@@ -17,8 +17,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Ensure output & data dirs exist
-RUN mkdir -p /data data
+# Clone Kronos source repo (provides the `model` python package required at runtime)
+RUN mkdir -p /data /app/temp /app/data && \
+    git clone --depth 1 https://github.com/shiyu-coder/Kronos.git /app/temp/Kronos
 
 EXPOSE 7080
 
