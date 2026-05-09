@@ -822,7 +822,7 @@ def llm_config_api():
     merged = _load_global()
     user_cfg = trade_storage.get_user_llm_config(config, uid)
     for k, v in user_cfg.items():
-        if v not in (None, ""):
+        if k == "model" or v not in (None, ""):
             merged[k] = v
     merged.pop("api_key", None)  # never send key back to browser
     merged["has_api_key"] = bool(user_cfg.get("api_key", "").strip())

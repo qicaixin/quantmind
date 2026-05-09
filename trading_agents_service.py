@@ -9,7 +9,12 @@ from datetime import date
 from typing import TYPE_CHECKING
 
 from config import ToolkitConfig
-from llm_service import load_llm_config, _get_proxy_url  # reuse proxy detection
+from llm_service import (
+    _get_proxy_url,
+    chat_completions_url,
+    load_llm_config,
+    resolve_llm_model,
+)
 
 if TYPE_CHECKING:
     pass
@@ -63,7 +68,7 @@ def _check_llm_reachable(llm_cfg: dict) -> str | None:
     provider = llm_cfg.get("provider", "Ollama").lower()
     base_url = llm_cfg.get("base_url", "").rstrip("/") or "https://api.openai.com"
     api_key  = llm_cfg.get("api_key", "").strip()
-    model    = llm_cfg.get("model", "")
+    model    = resolve_llm_model(llm_cfg)
 
     is_local = any(h in base_url for h in ("localhost", "127.0.0.1", "::1"))
 
@@ -91,9 +96,13 @@ def _check_llm_reachable(llm_cfg: dict) -> str | None:
     proxy_url = _get_proxy_url()
     proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else {}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    probe_url = f"{base_url}/v1/chat/completions"
+    if not model:
+        return "Could not auto-detect an LLM model. Please fill the model name in ⚙ Settings."
+
+    llm_cfg["model"] = model
+    probe_url = chat_completions_url(base_url)
     probe_body = {
-        "model": model or "gpt-4o-mini",
+        "model": model,
         "messages": [{"role": "user", "content": "hi"}],
         "max_tokens": 1,
     }
@@ -181,9 +190,11 @@ def _build_ta_config(llm_cfg: dict, *, lang: str = "en") -> dict:
 
     provider_raw = llm_cfg.get("provider", "Ollama").lower()
     ta_provider  = _PROVIDER_MAP.get(provider_raw, "openai")
-    model        = llm_cfg.get("model", "qwen2.5:7b")
+    model        = str(llm_cfg.get("model") or "").strip()
     base_url     = llm_cfg.get("base_url", "").rstrip("/")
     api_key      = llm_cfg.get("api_key", "").strip()
+    if not model:
+        model = resolve_llm_model(llm_cfg) or ("qwen2.5:7b" if ta_provider == "ollama" else "gpt-4o-mini")
 
     cfg["llm_provider"]    = ta_provider
     cfg["deep_think_llm"]  = model
@@ -247,7 +258,7 @@ def _run_job(job_id: str, symbol: str, trade_date: str, config: ToolkitConfig, *
         from trade_storage import get_user_llm_config
         user_llm = get_user_llm_config(config, user_id)
         for k, v in user_llm.items():
-            if v not in (None, ""):
+            if k == "model" or v not in (None, ""):
                 llm_cfg[k] = v
 
         # Pre-flight: verify LLM is reachable before spinning up the whole graph

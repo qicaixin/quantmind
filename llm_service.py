@@ -15,6 +15,29 @@ _DEFAULT_CONFIG = {
     "temperature": 0.3,
 }
 
+_MODEL_CACHE: dict[tuple[str, str], str] = {}
+_MODEL_PROBE_CANDIDATES = (
+    "deepseek-v3",
+    "deepseek-chat",
+    "deepseek-r1",
+    "qwen-turbo",
+    "qwen-plus",
+    "qwen-max",
+    "gpt-4o-mini",
+    "gpt-4o",
+    "glm-4",
+    "moonshot-v1-8k",
+)
+_NON_CHAT_MODEL_HINTS = (
+    "embedding",
+    "rerank",
+    "moderation",
+    "tts",
+    "whisper",
+    "audio",
+    "image",
+)
+
 # Capture system proxy at import time (before akshare can clear env vars)
 _SYSTEM_PROXY = {
     k: v for k, v in os.environ.items()
@@ -48,6 +71,167 @@ def _get_proxy_url() -> str | None:
     return None
 
 
+def _openai_compatible_url(base_url: str, endpoint: str) -> str:
+    """Build an OpenAI-compatible endpoint URL from root, /v1, or full chat URL."""
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        api_base = normalized.rsplit("/chat/completions", 1)[0]
+    elif normalized.endswith("/v1"):
+        api_base = normalized
+    else:
+        api_base = f"{normalized}/v1"
+    return f"{api_base}/{endpoint.lstrip('/')}"
+
+
+def _service_root_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        normalized = normalized.rsplit("/chat/completions", 1)[0]
+    if normalized.endswith("/v1"):
+        normalized = normalized.rsplit("/v1", 1)[0]
+    return normalized
+
+
+def chat_completions_url(base_url: str) -> str:
+    return _openai_compatible_url(base_url, "chat/completions")
+
+
+def models_url(base_url: str) -> str:
+    return _openai_compatible_url(base_url, "models")
+
+
+def _request_options(base_url: str) -> tuple[dict, bool]:
+    if _is_local_url(base_url):
+        return {"http": None, "https": None}, True
+    proxy_url = _get_proxy_url()
+    return ({"http": proxy_url, "https": proxy_url} if proxy_url else {}), False
+
+
+def _select_chat_model(model_ids: list[str]) -> str:
+    candidates = [
+        mid.strip()
+        for mid in model_ids
+        if mid and not any(hint in mid.lower() for hint in _NON_CHAT_MODEL_HINTS)
+    ]
+    if not candidates:
+        return ""
+
+    lower_to_model = {mid.lower(): mid for mid in candidates}
+    for preferred in _MODEL_PROBE_CANDIDATES:
+        if preferred in lower_to_model:
+            return lower_to_model[preferred]
+    for preferred in _MODEL_PROBE_CANDIDATES:
+        for mid in candidates:
+            if preferred in mid.lower():
+                return mid
+    for mid in candidates:
+        lowered = mid.lower()
+        if any(hint in lowered for hint in ("chat", "instruct", "gpt", "qwen", "deepseek", "glm")):
+            return mid
+    return candidates[0]
+
+
+def _model_ids_from_response(data: object) -> list[str]:
+    if isinstance(data, dict):
+        items = data.get("data")
+        if isinstance(items, list):
+            return [
+                item.get("id", "")
+                for item in items
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            ]
+        models = data.get("models")
+        if isinstance(models, list):
+            ids: list[str] = []
+            for item in models:
+                if isinstance(item, str):
+                    ids.append(item)
+                elif isinstance(item, dict):
+                    value = item.get("name") or item.get("id")
+                    if isinstance(value, str):
+                        ids.append(value)
+            return ids
+    return []
+
+
+def resolve_llm_model(config: dict) -> str:
+    """Return configured model, or auto-detect one for OpenAI-compatible APIs."""
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    configured = str(config.get("model") or "").strip()
+    if configured:
+        return configured
+
+    base_url = str(config.get("base_url") or "").rstrip("/")
+    api_key = str(config.get("api_key") or "").strip()
+    if not base_url:
+        return ""
+
+    cache_key = (base_url, "authenticated" if api_key else "anonymous")
+    cached = _MODEL_CACHE.get(cache_key)
+    if cached:
+        return cached
+
+    proxies, verify = _request_options(base_url)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        resp = requests.get(models_url(base_url), headers=headers, proxies=proxies, verify=verify, timeout=15)
+        if resp.status_code == 200:
+            selected = _select_chat_model(_model_ids_from_response(resp.json()))
+            if selected:
+                _MODEL_CACHE[cache_key] = selected
+                return selected
+    except (requests.exceptions.RequestException, ValueError):
+        pass
+
+    if _is_local_url(base_url):
+        try:
+            resp = requests.get(
+                f"{_service_root_url(base_url)}/api/tags",
+                proxies={"http": None, "https": None},
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                selected = _select_chat_model(_model_ids_from_response(resp.json()))
+                if selected:
+                    _MODEL_CACHE[cache_key] = selected
+                    return selected
+        except (requests.exceptions.RequestException, ValueError):
+            pass
+        return _DEFAULT_CONFIG["model"]
+
+    probe_url = chat_completions_url(base_url)
+    for candidate in _MODEL_PROBE_CANDIDATES:
+        payload = {
+            "model": candidate,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "stream": False,
+        }
+        try:
+            resp = requests.post(
+                probe_url,
+                headers=headers,
+                json=payload,
+                proxies=proxies,
+                verify=verify,
+                timeout=20,
+            )
+            if resp.status_code in (200, 201):
+                _MODEL_CACHE[cache_key] = candidate
+                return candidate
+            if resp.status_code == 401:
+                return ""
+        except requests.exceptions.RequestException:
+            return ""
+    return ""
+
+
 def load_llm_config() -> dict:
     if _CONFIG_PATH.exists():
         try:
@@ -75,13 +259,14 @@ def call_llm(system_prompt: str, user_prompt: str, *, config_override: dict | No
 
     config = load_llm_config()
     if config_override:
-        # Only merge non-empty values from user config
+        # Only merge non-empty values from user config, except an empty
+        # model explicitly means "auto-detect".
         for k, v in config_override.items():
-            if v not in (None, ""):
+            if k == "model" or v not in (None, ""):
                 config[k] = v
     api_key     = config.get("api_key", "").strip()
     base_url    = config.get("base_url", "").rstrip("/")
-    model       = config.get("model", "qwen2.5:7b")
+    model       = resolve_llm_model(config)
     max_tokens  = int(config.get("max_tokens", 800))
     temperature = float(config.get("temperature", 0.3))
 
@@ -91,8 +276,10 @@ def call_llm(system_prompt: str, user_prompt: str, *, config_override: dict | No
     is_local = _is_local_url(base_url)
     if not is_local and not api_key:
         return "⚠️ 外部 API 需要填写 API Key，请点击右上角「⚙ 设置」。"
+    if not model:
+        return "❌ 无法自动识别模型，请在设置中手动填写模型名称。"
 
-    url = f"{base_url}/v1/chat/completions"
+    url = chat_completions_url(base_url)
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -108,14 +295,7 @@ def call_llm(system_prompt: str, user_prompt: str, *, config_override: dict | No
         "stream": False,
     }
 
-    # Proxy config: local URLs bypass proxy; external use system proxy
-    if is_local:
-        proxies = {"http": None, "https": None}
-        verify  = True
-    else:
-        proxy_url = _get_proxy_url()
-        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else {}
-        verify  = False  # Corporate MITM proxy may use its own CA
+    proxies, verify = _request_options(base_url)
 
     try:
         resp = requests.post(url, headers=headers, json=payload,
