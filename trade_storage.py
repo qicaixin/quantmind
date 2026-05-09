@@ -196,6 +196,7 @@ def ensure_storage(config: ToolkitConfig) -> None:
                 enabled INTEGER NOT NULL DEFAULT 0,
                 symbols_csv TEXT NOT NULL DEFAULT '',
                 types_json TEXT NOT NULL DEFAULT '[]',
+                paper_trade_enabled INTEGER NOT NULL DEFAULT 0,
                 interval_minutes INTEGER NOT NULL DEFAULT 240,
                 lang TEXT NOT NULL DEFAULT 'zh',
                 last_run TEXT,
@@ -512,6 +513,7 @@ def _migrate_schema(config: ToolkitConfig) -> None:
             ("ta_analyses", "user_id", "INTEGER NOT NULL DEFAULT 1"),
             ("users", "llm_config_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("users", "broker_config_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("analysis_schedules", "paper_trade_enabled", "INTEGER NOT NULL DEFAULT 0"),
         ]
         for table, column, col_type in migrations:
             try:
@@ -715,6 +717,7 @@ def get_analysis_schedule(config: ToolkitConfig, user_id: int) -> dict:
             "enabled": False,
             "symbols": [],
             "types": ["kronos"],
+            "paper_trade_enabled": False,
             "interval_minutes": 240,
             "lang": "zh",
             "last_run": None,
@@ -732,6 +735,7 @@ def save_analysis_schedule(
     symbols: list[str],
     analysis_types: list[str],
     interval_minutes: int,
+    paper_trade_enabled: bool = False,
     lang: str = "zh",
 ) -> dict:
     ensure_storage(config)
@@ -746,13 +750,14 @@ def save_analysis_schedule(
         conn.execute(
             """
             INSERT INTO analysis_schedules (
-                user_id, enabled, symbols_csv, types_json, interval_minutes,
-                lang, next_run, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                user_id, enabled, symbols_csv, types_json, paper_trade_enabled,
+                interval_minutes, lang, next_run, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 enabled = excluded.enabled,
                 symbols_csv = excluded.symbols_csv,
                 types_json = excluded.types_json,
+                paper_trade_enabled = excluded.paper_trade_enabled,
                 interval_minutes = excluded.interval_minutes,
                 lang = excluded.lang,
                 next_run = excluded.next_run,
@@ -763,6 +768,7 @@ def save_analysis_schedule(
                 1 if enabled else 0,
                 ",".join(symbols),
                 json.dumps(analysis_types, ensure_ascii=False),
+                1 if paper_trade_enabled else 0,
                 interval_minutes,
                 lang,
                 next_run,
@@ -831,6 +837,7 @@ def _schedule_row_to_dict(row: sqlite3.Row) -> dict:
         "enabled": bool(row["enabled"]),
         "symbols": symbols,
         "types": analysis_types,
+        "paper_trade_enabled": bool(row["paper_trade_enabled"]),
         "interval_minutes": int(row["interval_minutes"]),
         "lang": row["lang"],
         "last_run": row["last_run"],

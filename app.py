@@ -415,13 +415,26 @@ def _run_scheduled_analysis(config: ToolkitConfig, schedule: dict) -> dict:
     user_id = int(schedule["user_id"])
     symbols = schedule.get("symbols") or []
     types = [item for item in (schedule.get("types") or []) if item in _SCHEDULE_ALLOWED_TYPES]
+    paper_trade_enabled = bool(schedule.get("paper_trade_enabled"))
     results: dict[str, dict] = {}
     for symbol in symbols:
         symbol_result: dict[str, object] = {}
+        form: dict | None = None
+        analysis: dict | None = None
         if "kronos" in types:
             form = _schedule_form_for_symbol(symbol)
             analysis = execute_and_store_analysis(form, user_id=user_id)
             symbol_result["kronos_analysis_id"] = analysis.get("analysis_id")
+        if paper_trade_enabled:
+            if analysis is None:
+                run = trade_storage.get_latest_analysis_run(config, user_id, symbol)
+                if run:
+                    form = run["form"]
+                    analysis = run["result"]
+            if form is not None and analysis is not None:
+                symbol_result["paper_trade"] = execute_paper_trade_action(form, analysis, user_id=user_id)
+            else:
+                symbol_result["paper_trade"] = {"skipped": "No Kronos analysis available for paper trade"}
         if "trade_agent" in types:
             job_id = ta_service.submit_job(config, symbol, None, lang=schedule.get("lang") or "zh", user_id=user_id)
             symbol_result["trade_agent_job_id"] = job_id
@@ -838,6 +851,7 @@ def analysis_schedule_api():
         interval_minutes = max(15, int(payload.get("interval_minutes", 240)))
         lang = "zh" if payload.get("lang", "zh") == "zh" else "en"
         enabled = bool(payload.get("enabled")) and bool(symbols) and bool(analysis_types)
+        paper_trade_enabled = bool(payload.get("paper_trade_enabled"))
         saved = trade_storage.save_analysis_schedule(
             config,
             uid,
@@ -845,6 +859,7 @@ def analysis_schedule_api():
             symbols=symbols,
             analysis_types=analysis_types,
             interval_minutes=interval_minutes,
+            paper_trade_enabled=paper_trade_enabled,
             lang=lang,
         )
         return jsonify({"ok": True, "schedule": saved})
