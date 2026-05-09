@@ -36,7 +36,8 @@ class ToolkitConfig:
     tokenizer_name: str = "NeoQuasar/Kronos-Tokenizer-base"
     model_revision: str = "901c26c1332695a2a8f243eb2f37243a37bea320"
     tokenizer_revision: str = "0e0117387f39004a9016484a186a908917e22426"
-    max_context: int = 512
+    # Kronos-small's internal attention/time mask supports 240 steps.
+    max_context: int = 240
     default_lookback: int = 400
     default_pred_len: int = 20
     signal_threshold: float = 0.0

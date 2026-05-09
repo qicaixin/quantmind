@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
@@ -122,6 +123,16 @@ def ensure_storage(config: ToolkitConfig) -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
 
+            CREATE TABLE IF NOT EXISTS analysis_runs (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL DEFAULT 1,
+                symbol TEXT NOT NULL,
+                form_json TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
             CREATE TABLE IF NOT EXISTS watchlist_items (
                 user_id INTEGER NOT NULL DEFAULT 1,
                 symbol TEXT NOT NULL,
@@ -181,24 +192,45 @@ def _ensure_default_user(config: ToolkitConfig) -> None:
 
 
 def create_user(config: ToolkitConfig, username: str, email: str, password: str) -> dict:
+    username = username.strip()
+    email = email.strip()
     with closing(_connect(config)) as conn:
-        cursor = conn.execute(
-            "INSERT INTO users (email, password_hash, display_name, created_at) VALUES (?, ?, ?, ?)",
-            (email, generate_password_hash(password), username, datetime.now().isoformat(timespec="seconds")),
-        )
+        existing = conn.execute(
+            "SELECT email, display_name FROM users WHERE lower(email) = lower(?) OR lower(display_name) = lower(?)",
+            (email, username),
+        ).fetchone()
+        if existing:
+            if existing["email"].lower() == email.lower():
+                raise ValueError("Email is already registered")
+            raise ValueError("Username is already taken")
+
+        try:
+            cursor = conn.execute(
+                "INSERT INTO users (email, password_hash, display_name, created_at) VALUES (?, ?, ?, ?)",
+                (email, generate_password_hash(password), username, datetime.now().isoformat(timespec="seconds")),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Email is already registered") from exc
         conn.commit()
         return {"id": cursor.lastrowid, "username": username, "email": email}
 
 
-def authenticate_user(config: ToolkitConfig, email: str, password: str) -> dict | None:
+def authenticate_user(config: ToolkitConfig, identifier: str, password: str) -> dict | None:
+    identifier = identifier.strip()
     with closing(_connect(config)) as conn:
-        row = conn.execute(
-            "SELECT id, email, password_hash, display_name FROM users WHERE email = ?",
-            (email,),
-        ).fetchone()
-        if not row or not check_password_hash(row["password_hash"], password):
-            return None
-        return {"id": row["id"], "email": row["email"], "username": row["display_name"]}
+        rows = conn.execute(
+            """
+            SELECT id, email, password_hash, display_name
+            FROM users
+            WHERE lower(email) = lower(?) OR lower(display_name) = lower(?)
+            ORDER BY lower(email) = lower(?) DESC, id ASC
+            """,
+            (identifier, identifier, identifier),
+        ).fetchall()
+        for row in rows:
+            if check_password_hash(row["password_hash"], password):
+                return {"id": row["id"], "email": row["email"], "username": row["display_name"]}
+        return None
 
 
 def get_user_by_id(config: ToolkitConfig, user_id: int) -> dict | None:
@@ -210,6 +242,49 @@ def get_user_by_id(config: ToolkitConfig, user_id: int) -> dict | None:
         if not row:
             return None
         return {"id": row["id"], "email": row["email"], "username": row["display_name"]}
+
+
+def update_user_credentials(
+    config: ToolkitConfig,
+    user_id: int,
+    username: str,
+    current_password: str = "",
+    new_password: str = "",
+) -> dict:
+    username = username.strip()
+    if not username:
+        raise ValueError("Username is required")
+    if new_password and len(new_password) < 6:
+        raise ValueError("Password must be at least 6 characters")
+
+    with closing(_connect(config)) as conn:
+        row = conn.execute(
+            "SELECT id, email, password_hash FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("User not found")
+        if new_password and not check_password_hash(row["password_hash"], current_password):
+            raise ValueError("Current password is incorrect")
+        existing = conn.execute(
+            "SELECT 1 FROM users WHERE lower(display_name) = lower(?) AND id <> ?",
+            (username, user_id),
+        ).fetchone()
+        if existing:
+            raise ValueError("Username is already taken")
+
+        if new_password:
+            conn.execute(
+                "UPDATE users SET display_name = ?, password_hash = ? WHERE id = ?",
+                (username, generate_password_hash(new_password), user_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE users SET display_name = ? WHERE id = ?",
+                (username, user_id),
+            )
+        conn.commit()
+        return {"id": row["id"], "email": row["email"], "username": username}
 
 
 def get_user_llm_config(config: ToolkitConfig, user_id: int) -> dict:
@@ -260,6 +335,80 @@ def save_user_broker_config(config: ToolkitConfig, user_id: int, broker_cfg: dic
             (json.dumps(broker_cfg, ensure_ascii=False), user_id),
         )
         conn.commit()
+
+
+def create_analysis_run(config: ToolkitConfig, user_id: int, form_data: dict, result: dict) -> dict:
+    analysis_id = uuid.uuid4().hex
+    stored_result = dict(result)
+    stored_result["analysis_id"] = analysis_id
+    symbol = stored_result.get("prediction", {}).get("summary", {}).get("symbol") or form_data.get("symbol", "")
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            """
+            INSERT INTO analysis_runs (id, user_id, symbol, form_json, result_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                analysis_id,
+                user_id,
+                symbol,
+                json.dumps(form_data, ensure_ascii=False),
+                json.dumps(stored_result, ensure_ascii=False),
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+    return stored_result
+
+
+def get_analysis_run(config: ToolkitConfig, user_id: int, analysis_id: str) -> dict | None:
+    with closing(_connect(config)) as conn:
+        row = conn.execute(
+            """
+            SELECT id, symbol, form_json, result_json, created_at
+            FROM analysis_runs
+            WHERE id = ? AND user_id = ?
+            """,
+            (analysis_id, user_id),
+        ).fetchone()
+    if not row:
+        return None
+    form_data = json.loads(row["form_json"])
+    result = json.loads(row["result_json"])
+    result["analysis_id"] = row["id"]
+    return {
+        "id": row["id"],
+        "symbol": row["symbol"],
+        "form": form_data,
+        "result": result,
+        "created_at": row["created_at"],
+    }
+
+
+def get_latest_analysis_run(config: ToolkitConfig, user_id: int, symbol: str) -> dict | None:
+    with closing(_connect(config)) as conn:
+        row = conn.execute(
+            """
+            SELECT id, symbol, form_json, result_json, created_at
+            FROM analysis_runs
+            WHERE user_id = ? AND symbol = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (user_id, symbol),
+        ).fetchone()
+    if not row:
+        return None
+    form_data = json.loads(row["form_json"])
+    result = json.loads(row["result_json"])
+    result["analysis_id"] = row["id"]
+    return {
+        "id": row["id"],
+        "symbol": row["symbol"],
+        "form": form_data,
+        "result": result,
+        "created_at": row["created_at"],
+    }
 
 
 def record_broker_order(config: ToolkitConfig, user_id: int, order_result: dict) -> int:

@@ -471,7 +471,18 @@ def get_t0_indicators(symbol: str, force: bool = False) -> dict | None:
                 df.loc[mask, col] = price[mask]
 
         df = df.dropna(subset=["close"]).reset_index(drop=True)
-        today_df = df[df["day"].astype(str).str.startswith(today)].copy()
+        day_str = df["day"].astype(str).str[:10]
+        today_df = df[day_str == today].copy()
+        session_date = today
+        is_current_session = True
+
+        if today_df.empty:
+            available_sessions = sorted(d for d in day_str.dropna().unique() if d)
+            if not available_sessions:
+                return None
+            session_date = available_sessions[-1]
+            is_current_session = False
+            today_df = df[day_str == session_date].copy()
 
         if today_df.empty:
             return None
@@ -549,7 +560,7 @@ def get_t0_indicators(symbol: str, force: bool = False) -> dict | None:
             vol_trend = f"放量 {ratio:.1f}x" if ratio > 1.2 else ("缩量 {:.1f}x".format(ratio) if ratio < 0.8 else "平稳")
 
         # Vol ratio vs previous days (5-day avg)
-        past_df = df[~df["day"].astype(str).str.startswith(today)]
+        past_df = df[day_str < session_date]
         vol_ratio = "—"
         if not past_df.empty:
             daily_vols = past_df.groupby(past_df["day"].astype(str).str[:10])["volume"].sum()
@@ -562,7 +573,7 @@ def get_t0_indicators(symbol: str, force: bool = False) -> dict | None:
                 vol_ratio = round(projected / avg5, 2)
 
         # Prev close & open
-        prev_df = df[~df["day"].astype(str).str.startswith(today)]
+        prev_df = df[day_str < session_date]
         prev_close = r2(prev_df["close"].iloc[-1]) if not prev_df.empty else None
         open_price = r2(today_df["close"].iloc[0])
         high_today = r2(today_df["close"].max())
@@ -594,6 +605,8 @@ def get_t0_indicators(symbol: str, force: bool = False) -> dict | None:
             score += 1; reasons.append("触及布林下轨")
         if bb_upper is not None and last_price > bb_upper:
             score -= 1; reasons.append("触及布林上轨")
+        if not is_current_session:
+            reasons.append(f"使用最近交易日数据({session_date})")
 
         if score >= 2:
             signal = "🟢 买入 (T+0低吸)"
@@ -604,6 +617,8 @@ def get_t0_indicators(symbol: str, force: bool = False) -> dict | None:
 
         result = {
             "symbol": normalized,
+            "session_date": session_date,
+            "is_current_session": is_current_session,
             "last_time": str(today_df["day"].iloc[-1]),
             "last_price": r2(last_price),
             "prev_close": prev_close,

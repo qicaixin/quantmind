@@ -118,6 +118,84 @@
             color: #2563eb;
             text-decoration: none;
         }
+        .decision-panel {
+            grid-column: 1 / -1;
+            border: 1px solid #dbeafe;
+            background: linear-gradient(135deg, #eff6ff 0%, #ffffff 55%);
+        }
+        .decision-header {
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            align-items: flex-start;
+            flex-wrap: wrap;
+        }
+        .action-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 16px;
+            border-radius: 999px;
+            font-weight: 800;
+            font-size: 20px;
+            letter-spacing: .02em;
+        }
+        .action-buy { color: #065f46; background: #d1fae5; border: 1px solid #6ee7b7; }
+        .action-sell { color: #991b1b; background: #fee2e2; border: 1px solid #fecaca; }
+        .action-hold { color: #92400e; background: #fef3c7; border: 1px solid #fde68a; }
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px;
+            margin-top: 16px;
+        }
+        .metric-card {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 12px;
+        }
+        .metric-label {
+            color: #6b7280;
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+        .metric-value {
+            font-size: 20px;
+            font-weight: 800;
+            color: #111827;
+        }
+        .metric-value.up { color: #047857; }
+        .metric-value.down { color: #dc2626; }
+        .rationale-list {
+            margin: 12px 0 0;
+            padding-left: 20px;
+            color: #374151;
+            line-height: 1.5;
+        }
+        details.raw-details {
+            margin-top: 12px;
+            border-top: 1px solid #e5e7eb;
+            padding-top: 10px;
+        }
+        details.raw-details summary {
+            cursor: pointer;
+            color: #2563eb;
+            font-weight: 700;
+        }
+        .latest-analysis-panel {
+            display: none;
+            border: 1px solid #e0e7ff;
+            background: #f8fafc;
+        }
+        .latest-analysis-panel.visible {
+            display: block;
+        }
+        .latest-meta {
+            color: #6b7280;
+            font-size: 13px;
+            margin-bottom: 10px;
+        }
         .links a:hover {
             text-decoration: underline;
         }
@@ -592,7 +670,7 @@
         <h1 data-i18n="title">Kronos + Qlib Stock Analyzer</h1>
         <div style="display:flex;gap:8px;align-items:center;">
             {% if current_user.is_authenticated %}
-            <span style="font-size:13px;color:#6b7280;">👤 {{ current_user.username }}</span>
+            <span id="user-display-name" style="font-size:13px;color:#6b7280;">👤 {{ current_user.username }}</span>
             <a href="/logout" class="lang-btn" style="font-size:12px;">Logout</a>
             {% endif %}
             <a href="/portfolio" class="lang-btn" data-i18n="portfolio_btn">Portfolio →</a>
@@ -646,8 +724,9 @@
     <div class="modal-backdrop" id="settings-modal">
         <div class="modal">
             <div class="settings-tabs">
-                <button class="settings-tab active" onclick="switchSettingsTab('llm')">🤖 AI / LLM</button>
-                <button class="settings-tab" onclick="switchSettingsTab('broker')">🏦 券商交易</button>
+                <button class="settings-tab active" data-settings-tab="llm" onclick="switchSettingsTab('llm')">🤖 AI / LLM</button>
+                <button class="settings-tab" data-settings-tab="broker" onclick="switchSettingsTab('broker')">🏦 券商交易</button>
+                <button class="settings-tab" data-settings-tab="account" onclick="switchSettingsTab('account')">👤 Account</button>
             </div>
 
             <!-- LLM Tab -->
@@ -710,6 +789,25 @@
                         <input type="checkbox" id="broker-confirm" checked style="width:auto;margin:0;">
                         下单前需要确认
                     </span>
+                </label>
+            </div>
+
+            <!-- Account Tab -->
+            <div class="settings-tab-content" id="tab-account">
+                <label>Username
+                    <input id="account-username" type="text" placeholder="Display name">
+                </label>
+                <label>Email
+                    <input id="account-email" type="email" disabled>
+                </label>
+                <label>Current Password
+                    <input id="account-current-password" type="password" autocomplete="current-password" placeholder="Required to change password">
+                </label>
+                <label>New Password
+                    <input id="account-new-password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password">
+                </label>
+                <label>Confirm New Password
+                    <input id="account-confirm-password" type="password" autocomplete="new-password" placeholder="Repeat new password">
                 </label>
             </div>
 
@@ -782,8 +880,6 @@
             </label>
             <div class="full-row">
                 <button type="submit" name="action" value="analyze" data-i18n="btn_analyze">Run Analysis</button>
-                <button type="submit" name="action" value="paper_trade" data-i18n="btn_paper">Run + Execute Paper Trade</button>
-                <button type="submit" name="action" value="live_export" data-i18n="btn_live">Run + Export Live Order</button>
                 <button type="button" class="broker-exec-btn" onclick="openManualOrderPanel()" style="font-size:12px;">🏦 手动下单</button>
             </div>
         </form>
@@ -796,37 +892,145 @@
         </div>
     </div>
 
+    <div class="panel latest-analysis-panel" id="latest-analysis-panel">
+        <h2 data-i18n="latest_analysis_title">Latest saved analysis</h2>
+        <div id="latest-analysis-content" class="latest-meta"></div>
+    </div>
+
     {% if error %}
     <div class="panel error">{{ error }}</div>
     {% endif %}
 
     {% if result %}
-    <div class="results">
-        <div class="panel">
-            <h2 data-i18n="rec_action">Recommended Action</h2>
-            <table class="metrics">
-                {% for key, value in result.prediction.recommendation.items() %}
-                <tr>
-                    <td>{{ key }}</td>
-                    <td>
-                        {% if key == "rationale" %}
-                            {{ value|join("; ") }}
-                        {% else %}
-                            {{ value }}
-                        {% endif %}
-                    </td>
-                </tr>
+    <div class="results server-analysis-output">
+        {% set rec = result.prediction.recommendation %}
+        {% set summary = result.prediction.summary %}
+        {% set bt = result.backtest.summary %}
+        {% set action = rec.action %}
+        <div class="panel decision-panel">
+            <div class="decision-header">
+                <div>
+                    <h2 data-i18n="analysis_overview">Analysis Overview</h2>
+                    <div style="color:#6b7280;font-size:13px;">
+                        {{ summary.label }} · {{ summary.symbol }} · <span data-i18n="as_of">As of</span> {{ summary.last_trade_date }}
+                    </div>
+                </div>
+                <div class="action-badge {% if action == 'BUY' %}action-buy{% elif action == 'SELL' %}action-sell{% else %}action-hold{% endif %}">
+                    {% if action == 'BUY' %}🟢{% elif action == 'SELL' %}🔴{% else %}🟡{% endif %}
+                    <span data-i18n="action_label">Action</span>: {{ action }}
+                </div>
+            </div>
+
+            <div class="metric-grid">
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="last_close">Last Close</div>
+                    <div class="metric-value">{{ summary.last_close }}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="expected_return">Expected Return</div>
+                    <div class="metric-value {% if rec.predicted_return_pct > 0 %}up{% elif rec.predicted_return_pct < 0 %}down{% endif %}">
+                        {{ rec.predicted_return_pct }}%
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="predicted_close">Predicted End Close</div>
+                    <div class="metric-value">{{ rec.predicted_end_close }}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="trend_strength">Forecast Up Ratio</div>
+                    <div class="metric-value">{{ rec.forecast_up_ratio_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="strategy_return">Backtest Return</div>
+                    <div class="metric-value {% if bt.strategy_return_pct > 0 %}up{% elif bt.strategy_return_pct < 0 %}down{% endif %}">
+                        {{ bt.strategy_return_pct }}%
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="max_drawdown">Max Drawdown</div>
+                    <div class="metric-value down">{{ bt.max_drawdown_pct }}%</div>
+                </div>
+            </div>
+
+            <h3 data-i18n="why_this_action">Why this action?</h3>
+            <ul class="rationale-list">
+                {% for item in rec.rationale %}
+                <li>{{ item }}</li>
                 {% endfor %}
-            </table>
+            </ul>
+
+            {% if result.analysis_id %}
+            <div class="full-row" style="margin-top:12px;">
+                <form method="post" style="display:inline-block;margin-right:8px;">
+                    <input type="hidden" name="analysis_id" value="{{ result.analysis_id }}">
+                    <input type="hidden" name="action" value="paper_trade">
+                    <button type="submit" data-i18n="btn_paper_from_analysis">Execute Paper Trade from This Analysis</button>
+                </form>
+                <form method="post" style="display:inline-block;">
+                    <input type="hidden" name="analysis_id" value="{{ result.analysis_id }}">
+                    <input type="hidden" name="action" value="live_export">
+                    <button type="submit" data-i18n="btn_live_from_analysis">Export Live Order from This Analysis</button>
+                </form>
+                <div style="font-size:12px;color:#6b7280;margin-top:6px;" data-i18n="analysis_id_hint">
+                    These actions reuse the stored analysis result and do not rerun Kronos or QLib.
+                </div>
+            </div>
+            {% endif %}
+            <details class="raw-details">
+                <summary data-i18n="raw_details">Show raw recommendation details</summary>
+                <table class="metrics">
+                    {% for key, value in rec.items() %}
+                    <tr>
+                        <td>{{ key }}</td>
+                        <td>
+                            {% if key == "rationale" %}
+                                {{ value|join("; ") }}
+                            {% else %}
+                                {{ value }}
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </details>
         </div>
 
         <div class="panel">
             <h2 data-i18n="forecast_summary">Forecast Summary</h2>
-            <table class="metrics">
-                {% for key, value in result.prediction.summary.items() %}
-                <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
-                {% endfor %}
-            </table>
+            <div class="metric-grid">
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="pred_5d_close">5D Close</div>
+                    <div class="metric-value">{{ summary.pred_5d_close }}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="pred_5d_return">5D Return</div>
+                    <div class="metric-value {% if summary.pred_5d_return_pct > 0 %}up{% elif summary.pred_5d_return_pct < 0 %}down{% endif %}">{{ summary.pred_5d_return_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="pred_10d_close">10D Close</div>
+                    <div class="metric-value">{{ summary.pred_10d_close }}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="pred_10d_return">10D Return</div>
+                    <div class="metric-value {% if summary.pred_10d_return_pct > 0 %}up{% elif summary.pred_10d_return_pct < 0 %}down{% endif %}">{{ summary.pred_10d_return_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="forecast_range">Forecast Range</div>
+                    <div class="metric-value" style="font-size:16px;">{{ summary.pred_min_close }} - {{ summary.pred_max_close }}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="data_source_label">Data Source</div>
+                    <div class="metric-value" style="font-size:16px;">{{ summary.source }}</div>
+                </div>
+            </div>
+            <details class="raw-details">
+                <summary data-i18n="raw_details">Show raw details</summary>
+                <table class="metrics">
+                    {% for key, value in result.prediction.summary.items() %}
+                    <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
+                    {% endfor %}
+                </table>
+            </details>
             <div class="links">
                 <a href="/outputs/{{ result.prediction.summary_file }}" target="_blank" data-i18n="link_summary_json">Summary JSON</a>
                 <a href="/outputs/{{ result.prediction.prediction_file }}" target="_blank" data-i18n="link_pred_csv">Prediction CSV</a>
@@ -836,11 +1040,40 @@
 
         <div class="panel">
             <h2 data-i18n="backtest_summary">Backtest Summary</h2>
-            <table class="metrics">
-                {% for key, value in result.backtest.summary.items() %}
-                <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
-                {% endfor %}
-            </table>
+            <div class="metric-grid">
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="strategy_return">Strategy Return</div>
+                    <div class="metric-value {% if bt.strategy_return_pct > 0 %}up{% elif bt.strategy_return_pct < 0 %}down{% endif %}">{{ bt.strategy_return_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="benchmark_return">Benchmark Return</div>
+                    <div class="metric-value {% if bt.benchmark_return_pct > 0 %}up{% elif bt.benchmark_return_pct < 0 %}down{% endif %}">{{ bt.benchmark_return_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="excess_return">Excess Return</div>
+                    <div class="metric-value {% if bt.excess_return_pct > 0 %}up{% elif bt.excess_return_pct < 0 %}down{% endif %}">{{ bt.excess_return_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="max_drawdown">Max Drawdown</div>
+                    <div class="metric-value down">{{ bt.max_drawdown_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="hit_rate">Hit Rate</div>
+                    <div class="metric-value">{{ bt.hit_rate_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="trade_count">Trades</div>
+                    <div class="metric-value">{{ bt.trade_count }}</div>
+                </div>
+            </div>
+            <details class="raw-details">
+                <summary data-i18n="raw_details">Show raw details</summary>
+                <table class="metrics">
+                    {% for key, value in result.backtest.summary.items() %}
+                    <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
+                    {% endfor %}
+                </table>
+            </details>
             <div class="links">
                 <a href="/outputs/{{ result.backtest.summary_file }}" target="_blank" data-i18n="link_backtest_json">Backtest JSON</a>
                 <a href="/outputs/{{ result.backtest.trades_file }}" target="_blank" data-i18n="link_trades_csv">Trades CSV</a>
@@ -897,13 +1130,13 @@
         </div>
     </div>
 
-    <div class="panel">
+    <div class="panel server-analysis-output">
         <h2 data-i18n="forecast_chart">Forecast Chart</h2>
         <img src="/outputs/{{ result.prediction.forecast_image }}" alt="Forecast chart">
     </div>
 
     {% if trade_result and trade_result.paper %}
-    <div class="panel">
+    <div class="panel server-analysis-output">
         <h2 data-i18n="paper_trade_result">Paper Trade Result</h2>
         <table class="metrics">
             {% for key, value in trade_result.paper.trade.items() %}
@@ -935,7 +1168,7 @@
     {% endif %}
 
     {% if trade_result and trade_result.live %}
-    <div class="panel">
+    <div class="panel server-analysis-output">
         <h2 data-i18n="live_order_export">Manual Live Order Export</h2>
         <table class="metrics">
             {% for key, value in trade_result.live.order.items() %}
@@ -1062,6 +1295,8 @@
 </div> <!-- /app-layout -->
 
 <script>
+    let currentAnalysisId = "{{ result.analysis_id if result and result.analysis_id else '' }}";
+    const renderedAnalysisSymbol = "{{ result.prediction.summary.symbol if result else '' }}";
     const I18N = {
         en: {
             title: "Kronos + Qlib Stock Analyzer",
@@ -1085,6 +1320,30 @@
             btn_analyze: "Run Analysis",
             btn_paper: "Run + Execute Paper Trade",
             btn_live: "Run + Export Live Order",
+            btn_paper_from_analysis: "Execute Paper Trade from This Analysis",
+            btn_live_from_analysis: "Export Live Order from This Analysis",
+            analysis_id_hint: "These actions reuse the stored analysis result and do not rerun Kronos or QLib.",
+            analysis_overview: "Analysis Overview",
+            as_of: "As of",
+            action_label: "Action",
+            last_close: "Last Close",
+            expected_return: "Expected Return",
+            predicted_close: "Predicted End Close",
+            trend_strength: "Forecast Up Ratio",
+            strategy_return: "Strategy Return",
+            max_drawdown: "Max Drawdown",
+            why_this_action: "Why this action?",
+            raw_details: "Show raw details",
+            pred_5d_close: "5D Close",
+            pred_5d_return: "5D Return",
+            pred_10d_close: "10D Close",
+            pred_10d_return: "10D Return",
+            forecast_range: "Forecast Range",
+            data_source_label: "Data Source",
+            benchmark_return: "Benchmark Return",
+            excess_return: "Excess Return",
+            hit_rate: "Hit Rate",
+            trade_count: "Trades",
             rec_action: "Recommended Action",
             forecast_summary: "Forecast Summary",
             backtest_summary: "Backtest Summary",
@@ -1139,6 +1398,10 @@
             watchlist_add: "+ Add",
             watchlist_placeholder: "Stock code",
             watchlist_empty: "No stocks in watchlist",
+            latest_analysis_title: "Latest saved analysis",
+            latest_no_analysis: "No saved Kronos analysis yet. Click Run Analysis to create one.",
+            latest_loaded_prefix: "Loaded saved analysis",
+            latest_ta_missing: "No previous TradingAgents analysis found for this symbol.",
         },
         zh: {
             title: "Kronos + Qlib 股票分析工具",
@@ -1162,6 +1425,30 @@
             btn_analyze: "运行分析",
             btn_paper: "运行 + 执行模拟交易",
             btn_live: "运行 + 导出实盘订单",
+            btn_paper_from_analysis: "基于本次分析执行模拟交易",
+            btn_live_from_analysis: "基于本次分析导出实盘订单",
+            analysis_id_hint: "这些操作会复用已保存的分析结果，不会重新运行 Kronos 或 QLib。",
+            analysis_overview: "分析总览",
+            as_of: "截至",
+            action_label: "操作",
+            last_close: "最新收盘价",
+            expected_return: "预期收益",
+            predicted_close: "预测期末价",
+            trend_strength: "预测上涨占比",
+            strategy_return: "策略收益",
+            max_drawdown: "最大回撤",
+            why_this_action: "为什么是这个操作？",
+            raw_details: "查看原始明细",
+            pred_5d_close: "5日预测价",
+            pred_5d_return: "5日收益",
+            pred_10d_close: "10日预测价",
+            pred_10d_return: "10日收益",
+            forecast_range: "预测区间",
+            data_source_label: "数据源",
+            benchmark_return: "基准收益",
+            excess_return: "超额收益",
+            hit_rate: "胜率",
+            trade_count: "交易次数",
             rec_action: "推荐操作",
             forecast_summary: "预测摘要",
             backtest_summary: "回测摘要",
@@ -1216,6 +1503,10 @@
             watchlist_add: "+ 添加",
             watchlist_placeholder: "输入股票代码",
             watchlist_empty: "暂无自选股",
+            latest_analysis_title: "最近保存的分析",
+            latest_no_analysis: "还没有保存的 Kronos 分析。点击“运行分析”后会自动保存。",
+            latest_loaded_prefix: "已加载保存的分析",
+            latest_ta_missing: "该股票暂无历史 TradingAgents 分析。",
         }
     };
 
@@ -1558,6 +1849,14 @@
             document.getElementById("broker-max-daily").value = cfg.max_daily_orders || 20;
             document.getElementById("broker-confirm").checked = cfg.require_confirmation !== false;
         });
+        // Load account info
+        fetch("/api/account").then(r => r.json()).then(user => {
+            document.getElementById("account-username").value = user.username || "";
+            document.getElementById("account-email").value = user.email || "";
+            document.getElementById("account-current-password").value = "";
+            document.getElementById("account-new-password").value = "";
+            document.getElementById("account-confirm-password").value = "";
+        });
         switchSettingsTab(tab || "llm");
         document.getElementById("settings-modal").classList.add("open");
     }
@@ -1567,11 +1866,12 @@
     }
 
     function switchSettingsTab(tab) {
-        document.querySelectorAll(".settings-tab").forEach(function(el, i) {
-            el.classList.toggle("active", (i === 0 && tab === "llm") || (i === 1 && tab === "broker"));
+        document.querySelectorAll(".settings-tab").forEach(function(el) {
+            el.classList.toggle("active", el.dataset.settingsTab === tab);
         });
         document.getElementById("tab-llm").classList.toggle("active", tab === "llm");
         document.getElementById("tab-broker").classList.toggle("active", tab === "broker");
+        document.getElementById("tab-account").classList.toggle("active", tab === "account");
     }
 
     function saveAllSettings() {
@@ -1596,12 +1896,45 @@
             require_confirmation: document.getElementById("broker-confirm").checked,
         };
 
+        const username = document.getElementById("account-username").value.trim();
+        const currentPassword = document.getElementById("account-current-password").value;
+        const newPassword = document.getElementById("account-new-password").value;
+        const confirmPassword = document.getElementById("account-confirm-password").value;
+        if (!username) {
+            alert("Username is required");
+            return;
+        }
+        if (newPassword !== confirmPassword) {
+            alert("New passwords do not match");
+            return;
+        }
+        const accountCfg = { username: username };
+        if (newPassword) {
+            accountCfg.current_password = currentPassword;
+            accountCfg.new_password = newPassword;
+        }
+
+        const parseSaveResponse = function(response) {
+            return response.json().then(data => {
+                if (!response.ok || data.error) throw new Error(data.error || "Save failed");
+                return data;
+            });
+        };
+
         Promise.all([
-            fetch("/api/llm-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(llmCfg) }),
-            fetch("/api/broker-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(brokerCfg) }),
-        ]).then(() => {
+            fetch("/api/llm-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(llmCfg) }).then(parseSaveResponse),
+            fetch("/api/broker-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(brokerCfg) }).then(parseSaveResponse),
+            fetch("/api/account", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(accountCfg) }).then(parseSaveResponse),
+        ]).then(results => {
+            const accountResult = results[2];
+            if (accountResult.user && accountResult.user.username) {
+                const displayName = document.getElementById("user-display-name");
+                if (displayName) displayName.textContent = "👤 " + accountResult.user.username;
+            }
             closeSettings();
             alert("✅ 设置已保存！");
+        }).catch(err => {
+            alert("❌ " + err.message);
         });
     }
 
@@ -1633,6 +1966,8 @@
         const rsiColor = ind.rsi < 40 ? "down" : ind.rsi > 60 ? "up" : "";
         const macdColor = ind.macd_hist > 0 ? "up" : "down";
 
+        const dataTime = ind.last_time ? String(ind.last_time) : "—";
+        const dataStatus = ind.is_current_session === false ? "非当日" : "当日";
         document.getElementById("t0-indicators").innerHTML = `
             <div class="t0-card"><div class="t0-card-label">VWAP</div><div class="t0-card-value">${fmtInd(ind.vwap)}</div></div>
             <div class="t0-card"><div class="t0-card-label">价格偏VWAP</div><div class="t0-card-value ${devColor}">${vwapDev !== null ? (vwapDev > 0 ? "+" : "") + vwapDev + "%" : "—"}</div></div>
@@ -1643,7 +1978,7 @@
             <div class="t0-card"><div class="t0-card-label">MA5 / MA10</div><div class="t0-card-value">${fmtInd(ind.ma5)} / ${fmtInd(ind.ma10)}</div></div>
             <div class="t0-card"><div class="t0-card-label">量比</div><div class="t0-card-value">${fmtInd(ind.vol_ratio)}</div></div>
             <div class="t0-card"><div class="t0-card-label">量趋势</div><div class="t0-card-value">${fmtInd(ind.vol_trend)}</div></div>
-            <div class="t0-card"><div class="t0-card-label">更新时间</div><div class="t0-card-value" style="font-size:11px" id="t0-refresh-time">${new Date().toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit",second:"2-digit"})}</div></div>`;
+            <div class="t0-card"><div class="t0-card-label">数据时间</div><div class="t0-card-value" style="font-size:11px" id="t0-refresh-time">${dataTime} (${dataStatus})</div></div>`;
 
         const reasons = (ind.signal_reasons || []).join(" · ");
         document.getElementById("t0-reasons").textContent = reasons ? "信号依据：" + reasons : "";
@@ -1826,10 +2161,21 @@
     function loadTaLatest() {
         var symbol = (document.getElementById("ta-symbol").value || "").trim();
         if (!symbol) { alert("Enter a symbol to load the latest analysis."); return; }
-        fetch("/api/ta-latest/" + symbol)
+        loadTaLatestForSymbol(symbol, false);
+    }
+
+    function loadTaLatestForSymbol(symbol, quiet) {
+        fetch("/api/ta-latest/" + encodeURIComponent(symbol))
         .then(r => r.json())
         .then(data => {
-            if (data.error) { taSetStatus("failed", "No previous analysis found for " + symbol); return; }
+            if (data.error) {
+                if (!quiet) taSetStatus("failed", "No previous analysis found for " + symbol);
+                else taSetStatus("failed", I18N[currentLang].latest_ta_missing || "No previous TradingAgents analysis found for this symbol.");
+                document.getElementById("ta-consensus").style.display = "none";
+                document.getElementById("ta-broker-action").style.display = "none";
+                document.getElementById("ta-reports").innerHTML = '<div class="ta-empty">' + escHtml(I18N[currentLang].latest_ta_missing || "No previous TradingAgents analysis found for this symbol.") + '</div>';
+                return;
+            }
             taSetStatus("done", "✅ Loaded latest analysis for " + data.symbol
                 + " (" + (data.trade_date || "") + ")");
             taRenderReports(data);
@@ -1839,7 +2185,9 @@
     }
 
     function taLoadConsensus(symbol, taDecision) {
-        fetch("/api/consensus/" + symbol)
+        var url = "/api/consensus/" + symbol;
+        if (currentAnalysisId) url += "?analysis_id=" + encodeURIComponent(currentAnalysisId);
+        fetch(url)
         .then(r => r.json())
         .then(data => {
             if (data.error) return;
@@ -1943,6 +2291,91 @@
             .replace(/>/g, "&gt;");
     }
 
+    function fmtPct(v) {
+        if (v === null || v === undefined || v === "") return "—";
+        var n = Number(v);
+        return Number.isFinite(n) ? n.toFixed(2) + "%" : escHtml(v);
+    }
+
+    function pctClass(v) {
+        var n = Number(v);
+        return Number.isFinite(n) && n > 0 ? "up" : (Number.isFinite(n) && n < 0 ? "down" : "");
+    }
+
+    function stockDigits(symbol) {
+        return String(symbol || "").replace(/\D/g, "").slice(-6);
+    }
+
+    function clearRenderedAnalysisIfStale(symbol) {
+        if (renderedAnalysisSymbol && stockDigits(renderedAnalysisSymbol) === stockDigits(symbol)) return;
+        currentAnalysisId = "";
+        document.querySelectorAll(".server-analysis-output").forEach(function(el) {
+            el.style.display = "none";
+        });
+    }
+
+    function renderLatestAnalysis(run) {
+        var panel = document.getElementById("latest-analysis-panel");
+        var content = document.getElementById("latest-analysis-content");
+        var t = I18N[currentLang];
+        if (!run || !run.result) {
+            currentAnalysisId = "";
+            panel.classList.add("visible");
+            content.innerHTML = escHtml(t.latest_no_analysis || "No saved Kronos analysis yet.");
+            return;
+        }
+
+        var result = run.result;
+        currentAnalysisId = result.analysis_id || run.id || "";
+        var summary = (result.prediction && result.prediction.summary) || {};
+        var rec = (result.prediction && result.prediction.recommendation) || {};
+        var bt = (result.backtest && result.backtest.summary) || {};
+        var action = rec.action || "HOLD";
+        var actionCls = action === "BUY" ? "action-buy" : (action === "SELL" ? "action-sell" : "action-hold");
+        var actionIcon = action === "BUY" ? "🟢" : (action === "SELL" ? "🔴" : "🟡");
+
+        panel.classList.add("visible");
+        content.innerHTML =
+            '<div class="latest-meta">' + escHtml(t.latest_loaded_prefix || "Loaded saved analysis") + ': '
+                + escHtml(run.created_at || "") + '</div>' +
+            '<div class="decision-header">' +
+                '<div><strong>' + escHtml(summary.label || summary.symbol || run.symbol || "") + '</strong>' +
+                '<div class="latest-meta">' + escHtml(summary.symbol || run.symbol || "") + ' · ' + escHtml(summary.last_trade_date || "") + '</div></div>' +
+                '<div class="action-badge ' + actionCls + '">' + actionIcon + ' ' + escHtml(action) + '</div>' +
+            '</div>' +
+            '<div class="metric-grid">' +
+                '<div class="metric-card"><div class="metric-label">' + escHtml(t.expected_return || "Expected Return") + '</div><div class="metric-value ' + pctClass(rec.predicted_return_pct) + '">' + fmtPct(rec.predicted_return_pct) + '</div></div>' +
+                '<div class="metric-card"><div class="metric-label">' + escHtml(t.predicted_close || "Predicted End Close") + '</div><div class="metric-value">' + escHtml(rec.predicted_end_close || "—") + '</div></div>' +
+                '<div class="metric-card"><div class="metric-label">' + escHtml(t.strategy_return || "Strategy Return") + '</div><div class="metric-value ' + pctClass(bt.strategy_return_pct) + '">' + fmtPct(bt.strategy_return_pct) + '</div></div>' +
+                '<div class="metric-card"><div class="metric-label">' + escHtml(t.max_drawdown || "Max Drawdown") + '</div><div class="metric-value down">' + fmtPct(bt.max_drawdown_pct) + '</div></div>' +
+            '</div>' +
+            '<div class="links" style="margin-top:12px;">' +
+                (result.prediction && result.prediction.summary_file ? '<a href="/outputs/' + escHtml(result.prediction.summary_file) + '" target="_blank">' + escHtml(t.link_summary_json || "Summary JSON") + '</a>' : '') +
+                (result.backtest && result.backtest.summary_file ? '<a href="/outputs/' + escHtml(result.backtest.summary_file) + '" target="_blank">' + escHtml(t.link_backtest_json || "Backtest JSON") + '</a>' : '') +
+            '</div>';
+    }
+
+    function loadLatestForWatchlistSymbol(symbol) {
+        var panel = document.getElementById("latest-analysis-panel");
+        var content = document.getElementById("latest-analysis-content");
+        currentAnalysisId = "";
+        panel.classList.add("visible");
+        content.innerHTML = "⏳ Loading latest saved analysis...";
+        return fetch("/api/analysis-latest/" + encodeURIComponent(symbol))
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) {
+                    renderLatestAnalysis(null);
+                    return;
+                }
+                renderLatestAnalysis(data);
+            })
+            .catch(e => {
+                currentAnalysisId = "";
+                content.innerHTML = "❌ " + escHtml(e);
+            });
+    }
+
     // ── Watchlist ────────────────────────────────────────────────────
     var watchlistData = [];
     var watchlistActiveSymbol = "";
@@ -2019,6 +2452,7 @@
     function selectWatchlistItem(symbol) {
         watchlistActiveSymbol = symbol;
         renderWatchlist();
+        clearRenderedAnalysisIfStale(symbol);
 
         var symbolInput = document.getElementById("symbol");
         if (symbolInput) {
@@ -2027,6 +2461,9 @@
         }
         var taInput = document.getElementById("ta-symbol");
         if (taInput) taInput.value = symbol;
+        loadLatestForWatchlistSymbol(symbol).finally(function() {
+            loadTaLatestForSymbol(symbol, true);
+        });
     }
 
     // Enter key support for watchlist input

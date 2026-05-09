@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import secrets
 from datetime import datetime
 from pathlib import Path
 
@@ -195,6 +194,30 @@ def execute_analysis(form_data: dict, *, user_id: int = 1) -> dict:
     }
 
 
+def execute_and_store_analysis(form_data: dict, *, user_id: int = 1) -> dict:
+    config = ToolkitConfig()
+    trade_storage.ensure_storage(config)
+    result = execute_analysis(form_data, user_id=user_id)
+    return trade_storage.create_analysis_run(config, user_id, form_data, result)
+
+
+def load_stored_analysis(analysis_id: str, *, user_id: int) -> tuple[dict, dict]:
+    config = ToolkitConfig()
+    trade_storage.ensure_storage(config)
+    run = trade_storage.get_analysis_run(config, user_id, analysis_id)
+    if run is None:
+        raise ValueError("Analysis run not found. Please run analysis again.")
+    return run["form"], run["result"]
+
+
+def resolve_analysis_for_action(payload: dict, *, user_id: int) -> tuple[dict, dict]:
+    analysis_id = str(payload.get("analysis_id", "")).strip()
+    if analysis_id:
+        return load_stored_analysis(analysis_id, user_id=user_id)
+    form_data = parse_form(payload)
+    return form_data, execute_and_store_analysis(form_data, user_id=user_id)
+
+
 def _best_execution_price(symbol: str, fallback_close: float) -> tuple[float, str]:
     """Return (price, source_label). Prefers real-time quote during market hours."""
     try:
@@ -265,17 +288,17 @@ def login():
         return redirect(url_for("index"))
     error = None
     if request.method == "POST":
-        email = request.form.get("email", "").strip()
+        identifier = request.form.get("identifier", request.form.get("email", "")).strip()
         password = request.form.get("password", "")
         config = ToolkitConfig()
         trade_storage.ensure_storage(config)
-        user_row = trade_storage.authenticate_user(config, email, password)
+        user_row = trade_storage.authenticate_user(config, identifier, password)
         if user_row:
             user = User(id=user_row["id"], username=user_row["username"], email=user_row["email"])
             login_user(user)
             next_page = request.args.get("next")
             return redirect(next_page or url_for("index"))
-        error = "Invalid email or password"
+        error = "Invalid username/email or password"
     return render_template("login.html", error=error)
 
 
@@ -322,9 +345,13 @@ def index():
     uid = _uid()
     if request.method == "POST":
         try:
-            form_data = parse_form(request.form.to_dict())
-            result = execute_analysis(form_data, user_id=uid)
             action = request.form.get("action", "analyze")
+            analysis_id = request.form.get("analysis_id", "").strip()
+            if analysis_id:
+                form_data, result = load_stored_analysis(analysis_id, user_id=uid)
+            else:
+                form_data = parse_form(request.form.to_dict())
+                result = execute_and_store_analysis(form_data, user_id=uid)
             if action == "paper_trade":
                 trade_result = {"paper": execute_paper_trade_action(form_data, result, user_id=uid)}
             elif action == "live_export":
@@ -348,8 +375,23 @@ def analyze_api():
     payload = request.get_json(silent=True) or {}
     try:
         form_data = parse_form(payload)
-        result = execute_analysis(form_data, user_id=_uid())
+        result = execute_and_store_analysis(form_data, user_id=_uid())
         return jsonify(result)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/analysis-latest/<symbol>")
+@login_required
+def analysis_latest_api(symbol: str):
+    try:
+        sym = normalize_symbol(symbol.strip())
+        config = ToolkitConfig()
+        trade_storage.ensure_storage(config)
+        run = trade_storage.get_latest_analysis_run(config, _uid(), sym)
+        if run is None:
+            return jsonify({"error": "No saved analysis found"}), 404
+        return jsonify(run)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -359,9 +401,9 @@ def analyze_api():
 def paper_trade_api():
     payload = request.get_json(silent=True) or {}
     try:
-        form_data = parse_form(payload)
-        result = execute_analysis(form_data, user_id=_uid())
-        trade_result = execute_paper_trade_action(form_data, result, user_id=_uid())
+        uid = _uid()
+        form_data, result = resolve_analysis_for_action(payload, user_id=uid)
+        trade_result = execute_paper_trade_action(form_data, result, user_id=uid)
         return jsonify({"analysis": result, "paper_trade": trade_result})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
@@ -372,9 +414,9 @@ def paper_trade_api():
 def live_export_api():
     payload = request.get_json(silent=True) or {}
     try:
-        form_data = parse_form(payload)
-        result = execute_analysis(form_data, user_id=_uid())
-        trade_result = execute_live_export_action(form_data, result, user_id=_uid())
+        uid = _uid()
+        form_data, result = resolve_analysis_for_action(payload, user_id=uid)
+        trade_result = execute_live_export_action(form_data, result, user_id=uid)
         return jsonify({"analysis": result, "live_export": trade_result})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
@@ -455,6 +497,35 @@ def llm_config_api():
     merged.pop("api_key", None)  # never send key back to browser
     merged["has_api_key"] = bool(user_cfg.get("api_key", "").strip())
     return jsonify(merged)
+
+
+@app.route("/api/account", methods=["GET", "POST"])
+@login_required
+def account_api():
+    config = ToolkitConfig()
+    trade_storage.ensure_storage(config)
+    uid = _uid()
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        try:
+            updated = trade_storage.update_user_credentials(
+                config=config,
+                user_id=uid,
+                username=str(payload.get("username", "")).strip(),
+                current_password=str(payload.get("current_password", "")),
+                new_password=str(payload.get("new_password", "")),
+            )
+            current_user.username = updated["username"]
+            return jsonify({"ok": True, "user": updated})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    row = trade_storage.get_user_by_id(config, uid)
+    if row is None:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify(row)
 
 
 # ── Broker config & order execution ────────────────────────────────────
@@ -797,18 +868,24 @@ def consensus_api(symbol: str):
         if ta_result is None:
             return jsonify({"error": "No TA analysis found — run agent analysis first"}), 404
 
-        # Try to load last Kronos recommendation from the most recent summary JSON
+        # Prefer an explicit analysis run so consensus is tied to the result the user reviewed.
         kronos_action = "HOLD"
-        out_dir = config.user_output_dir(uid)
-        summary_path = out_dir / f"{sym}_summary.json"
-        if summary_path.exists():
-            import json as _json
-            try:
-                summary = _json.loads(summary_path.read_text(encoding="utf-8"))
-                kronos_action = summary.get("recommended_action", "HOLD")
-            except Exception:
-                pass
-
+        analysis_id = request.args.get("analysis_id", "").strip()
+        if analysis_id:
+            run = trade_storage.get_analysis_run(config, uid, analysis_id)
+            if run is None:
+                return jsonify({"error": "Analysis run not found"}), 404
+            kronos_action = run["result"]["prediction"]["recommendation"].get("action", "HOLD")
+        else:
+            out_dir = config.user_output_dir(uid)
+            summary_path = out_dir / f"{sym}_summary.json"
+            if summary_path.exists():
+                import json as _json
+                try:
+                    summary = _json.loads(summary_path.read_text(encoding="utf-8"))
+                    kronos_action = summary.get("recommended_action", "HOLD")
+                except Exception:
+                    pass
         consensus = ta_service.build_consensus(kronos_action, ta_result["decision"] or "HOLD")
         return jsonify({
             "symbol":        sym,
