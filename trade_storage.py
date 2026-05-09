@@ -181,24 +181,45 @@ def _ensure_default_user(config: ToolkitConfig) -> None:
 
 
 def create_user(config: ToolkitConfig, username: str, email: str, password: str) -> dict:
+    username = username.strip()
+    email = email.strip()
     with closing(_connect(config)) as conn:
-        cursor = conn.execute(
-            "INSERT INTO users (email, password_hash, display_name, created_at) VALUES (?, ?, ?, ?)",
-            (email, generate_password_hash(password), username, datetime.now().isoformat(timespec="seconds")),
-        )
+        existing = conn.execute(
+            "SELECT email, display_name FROM users WHERE lower(email) = lower(?) OR lower(display_name) = lower(?)",
+            (email, username),
+        ).fetchone()
+        if existing:
+            if existing["email"].lower() == email.lower():
+                raise ValueError("Email is already registered")
+            raise ValueError("Username is already taken")
+
+        try:
+            cursor = conn.execute(
+                "INSERT INTO users (email, password_hash, display_name, created_at) VALUES (?, ?, ?, ?)",
+                (email, generate_password_hash(password), username, datetime.now().isoformat(timespec="seconds")),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Email is already registered") from exc
         conn.commit()
         return {"id": cursor.lastrowid, "username": username, "email": email}
 
 
-def authenticate_user(config: ToolkitConfig, email: str, password: str) -> dict | None:
+def authenticate_user(config: ToolkitConfig, identifier: str, password: str) -> dict | None:
+    identifier = identifier.strip()
     with closing(_connect(config)) as conn:
-        row = conn.execute(
-            "SELECT id, email, password_hash, display_name FROM users WHERE email = ?",
-            (email,),
-        ).fetchone()
-        if not row or not check_password_hash(row["password_hash"], password):
-            return None
-        return {"id": row["id"], "email": row["email"], "username": row["display_name"]}
+        rows = conn.execute(
+            """
+            SELECT id, email, password_hash, display_name
+            FROM users
+            WHERE lower(email) = lower(?) OR lower(display_name) = lower(?)
+            ORDER BY lower(email) = lower(?) DESC, id ASC
+            """,
+            (identifier, identifier, identifier),
+        ).fetchall()
+        for row in rows:
+            if check_password_hash(row["password_hash"], password):
+                return {"id": row["id"], "email": row["email"], "username": row["display_name"]}
+        return None
 
 
 def get_user_by_id(config: ToolkitConfig, user_id: int) -> dict | None:
@@ -234,6 +255,12 @@ def update_user_credentials(
             raise ValueError("User not found")
         if new_password and not check_password_hash(row["password_hash"], current_password):
             raise ValueError("Current password is incorrect")
+        existing = conn.execute(
+            "SELECT 1 FROM users WHERE lower(display_name) = lower(?) AND id <> ?",
+            (username, user_id),
+        ).fetchone()
+        if existing:
+            raise ValueError("Username is already taken")
 
         if new_password:
             conn.execute(

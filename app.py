@@ -265,17 +265,17 @@ def login():
         return redirect(url_for("index"))
     error = None
     if request.method == "POST":
-        email = request.form.get("email", "").strip()
+        identifier = request.form.get("identifier", request.form.get("email", "")).strip()
         password = request.form.get("password", "")
         config = ToolkitConfig()
         trade_storage.ensure_storage(config)
-        user_row = trade_storage.authenticate_user(config, email, password)
+        user_row = trade_storage.authenticate_user(config, identifier, password)
         if user_row:
             user = User(id=user_row["id"], username=user_row["username"], email=user_row["email"])
             login_user(user)
             next_page = request.args.get("next")
             return redirect(next_page or url_for("index"))
-        error = "Invalid email or password"
+        error = "Invalid username/email or password"
     return render_template("login.html", error=error)
 
 
