@@ -118,6 +118,71 @@
             color: #2563eb;
             text-decoration: none;
         }
+        .decision-panel {
+            grid-column: 1 / -1;
+            border: 1px solid #dbeafe;
+            background: linear-gradient(135deg, #eff6ff 0%, #ffffff 55%);
+        }
+        .decision-header {
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            align-items: flex-start;
+            flex-wrap: wrap;
+        }
+        .action-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 16px;
+            border-radius: 999px;
+            font-weight: 800;
+            font-size: 20px;
+            letter-spacing: .02em;
+        }
+        .action-buy { color: #065f46; background: #d1fae5; border: 1px solid #6ee7b7; }
+        .action-sell { color: #991b1b; background: #fee2e2; border: 1px solid #fecaca; }
+        .action-hold { color: #92400e; background: #fef3c7; border: 1px solid #fde68a; }
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px;
+            margin-top: 16px;
+        }
+        .metric-card {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 12px;
+        }
+        .metric-label {
+            color: #6b7280;
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+        .metric-value {
+            font-size: 20px;
+            font-weight: 800;
+            color: #111827;
+        }
+        .metric-value.up { color: #047857; }
+        .metric-value.down { color: #dc2626; }
+        .rationale-list {
+            margin: 12px 0 0;
+            padding-left: 20px;
+            color: #374151;
+            line-height: 1.5;
+        }
+        details.raw-details {
+            margin-top: 12px;
+            border-top: 1px solid #e5e7eb;
+            padding-top: 10px;
+        }
+        details.raw-details summary {
+            cursor: pointer;
+            color: #2563eb;
+            font-weight: 700;
+        }
         .links a:hover {
             text-decoration: underline;
         }
@@ -820,22 +885,62 @@
 
     {% if result %}
     <div class="results">
-        <div class="panel">
-            <h2 data-i18n="rec_action">Recommended Action</h2>
-            <table class="metrics">
-                {% for key, value in result.prediction.recommendation.items() %}
-                <tr>
-                    <td>{{ key }}</td>
-                    <td>
-                        {% if key == "rationale" %}
-                            {{ value|join("; ") }}
-                        {% else %}
-                            {{ value }}
-                        {% endif %}
-                    </td>
-                </tr>
+        {% set rec = result.prediction.recommendation %}
+        {% set summary = result.prediction.summary %}
+        {% set bt = result.backtest.summary %}
+        {% set action = rec.action %}
+        <div class="panel decision-panel">
+            <div class="decision-header">
+                <div>
+                    <h2 data-i18n="analysis_overview">Analysis Overview</h2>
+                    <div style="color:#6b7280;font-size:13px;">
+                        {{ summary.label }} · {{ summary.symbol }} · <span data-i18n="as_of">As of</span> {{ summary.last_trade_date }}
+                    </div>
+                </div>
+                <div class="action-badge {% if action == 'BUY' %}action-buy{% elif action == 'SELL' %}action-sell{% else %}action-hold{% endif %}">
+                    {% if action == 'BUY' %}🟢{% elif action == 'SELL' %}🔴{% else %}🟡{% endif %}
+                    <span data-i18n="action_label">Action</span>: {{ action }}
+                </div>
+            </div>
+
+            <div class="metric-grid">
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="last_close">Last Close</div>
+                    <div class="metric-value">{{ summary.last_close }}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="expected_return">Expected Return</div>
+                    <div class="metric-value {% if rec.predicted_return_pct > 0 %}up{% elif rec.predicted_return_pct < 0 %}down{% endif %}">
+                        {{ rec.predicted_return_pct }}%
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="predicted_close">Predicted End Close</div>
+                    <div class="metric-value">{{ rec.predicted_end_close }}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="trend_strength">Forecast Up Ratio</div>
+                    <div class="metric-value">{{ rec.forecast_up_ratio_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="strategy_return">Backtest Return</div>
+                    <div class="metric-value {% if bt.strategy_return_pct > 0 %}up{% elif bt.strategy_return_pct < 0 %}down{% endif %}">
+                        {{ bt.strategy_return_pct }}%
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="max_drawdown">Max Drawdown</div>
+                    <div class="metric-value down">{{ bt.max_drawdown_pct }}%</div>
+                </div>
+            </div>
+
+            <h3 data-i18n="why_this_action">Why this action?</h3>
+            <ul class="rationale-list">
+                {% for item in rec.rationale %}
+                <li>{{ item }}</li>
                 {% endfor %}
-            </table>
+            </ul>
+
             {% if result.analysis_id %}
             <div class="full-row" style="margin-top:12px;">
                 <form method="post" style="display:inline-block;margin-right:8px;">
@@ -853,15 +958,61 @@
                 </div>
             </div>
             {% endif %}
+            <details class="raw-details">
+                <summary data-i18n="raw_details">Show raw recommendation details</summary>
+                <table class="metrics">
+                    {% for key, value in rec.items() %}
+                    <tr>
+                        <td>{{ key }}</td>
+                        <td>
+                            {% if key == "rationale" %}
+                                {{ value|join("; ") }}
+                            {% else %}
+                                {{ value }}
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </details>
         </div>
 
         <div class="panel">
             <h2 data-i18n="forecast_summary">Forecast Summary</h2>
-            <table class="metrics">
-                {% for key, value in result.prediction.summary.items() %}
-                <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
-                {% endfor %}
-            </table>
+            <div class="metric-grid">
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="pred_5d_close">5D Close</div>
+                    <div class="metric-value">{{ summary.pred_5d_close }}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="pred_5d_return">5D Return</div>
+                    <div class="metric-value {% if summary.pred_5d_return_pct > 0 %}up{% elif summary.pred_5d_return_pct < 0 %}down{% endif %}">{{ summary.pred_5d_return_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="pred_10d_close">10D Close</div>
+                    <div class="metric-value">{{ summary.pred_10d_close }}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="pred_10d_return">10D Return</div>
+                    <div class="metric-value {% if summary.pred_10d_return_pct > 0 %}up{% elif summary.pred_10d_return_pct < 0 %}down{% endif %}">{{ summary.pred_10d_return_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="forecast_range">Forecast Range</div>
+                    <div class="metric-value" style="font-size:16px;">{{ summary.pred_min_close }} - {{ summary.pred_max_close }}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="data_source_label">Data Source</div>
+                    <div class="metric-value" style="font-size:16px;">{{ summary.source }}</div>
+                </div>
+            </div>
+            <details class="raw-details">
+                <summary data-i18n="raw_details">Show raw details</summary>
+                <table class="metrics">
+                    {% for key, value in result.prediction.summary.items() %}
+                    <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
+                    {% endfor %}
+                </table>
+            </details>
             <div class="links">
                 <a href="/outputs/{{ result.prediction.summary_file }}" target="_blank" data-i18n="link_summary_json">Summary JSON</a>
                 <a href="/outputs/{{ result.prediction.prediction_file }}" target="_blank" data-i18n="link_pred_csv">Prediction CSV</a>
@@ -871,11 +1022,40 @@
 
         <div class="panel">
             <h2 data-i18n="backtest_summary">Backtest Summary</h2>
-            <table class="metrics">
-                {% for key, value in result.backtest.summary.items() %}
-                <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
-                {% endfor %}
-            </table>
+            <div class="metric-grid">
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="strategy_return">Strategy Return</div>
+                    <div class="metric-value {% if bt.strategy_return_pct > 0 %}up{% elif bt.strategy_return_pct < 0 %}down{% endif %}">{{ bt.strategy_return_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="benchmark_return">Benchmark Return</div>
+                    <div class="metric-value {% if bt.benchmark_return_pct > 0 %}up{% elif bt.benchmark_return_pct < 0 %}down{% endif %}">{{ bt.benchmark_return_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="excess_return">Excess Return</div>
+                    <div class="metric-value {% if bt.excess_return_pct > 0 %}up{% elif bt.excess_return_pct < 0 %}down{% endif %}">{{ bt.excess_return_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="max_drawdown">Max Drawdown</div>
+                    <div class="metric-value down">{{ bt.max_drawdown_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="hit_rate">Hit Rate</div>
+                    <div class="metric-value">{{ bt.hit_rate_pct }}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" data-i18n="trade_count">Trades</div>
+                    <div class="metric-value">{{ bt.trade_count }}</div>
+                </div>
+            </div>
+            <details class="raw-details">
+                <summary data-i18n="raw_details">Show raw details</summary>
+                <table class="metrics">
+                    {% for key, value in result.backtest.summary.items() %}
+                    <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
+                    {% endfor %}
+                </table>
+            </details>
             <div class="links">
                 <a href="/outputs/{{ result.backtest.summary_file }}" target="_blank" data-i18n="link_backtest_json">Backtest JSON</a>
                 <a href="/outputs/{{ result.backtest.trades_file }}" target="_blank" data-i18n="link_trades_csv">Trades CSV</a>
@@ -1124,6 +1304,27 @@
             btn_paper_from_analysis: "Execute Paper Trade from This Analysis",
             btn_live_from_analysis: "Export Live Order from This Analysis",
             analysis_id_hint: "These actions reuse the stored analysis result and do not rerun Kronos or QLib.",
+            analysis_overview: "Analysis Overview",
+            as_of: "As of",
+            action_label: "Action",
+            last_close: "Last Close",
+            expected_return: "Expected Return",
+            predicted_close: "Predicted End Close",
+            trend_strength: "Forecast Up Ratio",
+            strategy_return: "Strategy Return",
+            max_drawdown: "Max Drawdown",
+            why_this_action: "Why this action?",
+            raw_details: "Show raw details",
+            pred_5d_close: "5D Close",
+            pred_5d_return: "5D Return",
+            pred_10d_close: "10D Close",
+            pred_10d_return: "10D Return",
+            forecast_range: "Forecast Range",
+            data_source_label: "Data Source",
+            benchmark_return: "Benchmark Return",
+            excess_return: "Excess Return",
+            hit_rate: "Hit Rate",
+            trade_count: "Trades",
             rec_action: "Recommended Action",
             forecast_summary: "Forecast Summary",
             backtest_summary: "Backtest Summary",
@@ -1204,6 +1405,27 @@
             btn_paper_from_analysis: "基于本次分析执行模拟交易",
             btn_live_from_analysis: "基于本次分析导出实盘订单",
             analysis_id_hint: "这些操作会复用已保存的分析结果，不会重新运行 Kronos 或 QLib。",
+            analysis_overview: "分析总览",
+            as_of: "截至",
+            action_label: "操作",
+            last_close: "最新收盘价",
+            expected_return: "预期收益",
+            predicted_close: "预测期末价",
+            trend_strength: "预测上涨占比",
+            strategy_return: "策略收益",
+            max_drawdown: "最大回撤",
+            why_this_action: "为什么是这个操作？",
+            raw_details: "查看原始明细",
+            pred_5d_close: "5日预测价",
+            pred_5d_return: "5日收益",
+            pred_10d_close: "10日预测价",
+            pred_10d_return: "10日收益",
+            forecast_range: "预测区间",
+            data_source_label: "数据源",
+            benchmark_return: "基准收益",
+            excess_return: "超额收益",
+            hit_rate: "胜率",
+            trade_count: "交易次数",
             rec_action: "推荐操作",
             forecast_summary: "预测摘要",
             backtest_summary: "回测摘要",
