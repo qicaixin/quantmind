@@ -592,7 +592,7 @@
         <h1 data-i18n="title">Kronos + Qlib Stock Analyzer</h1>
         <div style="display:flex;gap:8px;align-items:center;">
             {% if current_user.is_authenticated %}
-            <span style="font-size:13px;color:#6b7280;">👤 {{ current_user.username }}</span>
+            <span id="user-display-name" style="font-size:13px;color:#6b7280;">👤 {{ current_user.username }}</span>
             <a href="/logout" class="lang-btn" style="font-size:12px;">Logout</a>
             {% endif %}
             <a href="/portfolio" class="lang-btn" data-i18n="portfolio_btn">Portfolio →</a>
@@ -646,8 +646,9 @@
     <div class="modal-backdrop" id="settings-modal">
         <div class="modal">
             <div class="settings-tabs">
-                <button class="settings-tab active" onclick="switchSettingsTab('llm')">🤖 AI / LLM</button>
-                <button class="settings-tab" onclick="switchSettingsTab('broker')">🏦 券商交易</button>
+                <button class="settings-tab active" data-settings-tab="llm" onclick="switchSettingsTab('llm')">🤖 AI / LLM</button>
+                <button class="settings-tab" data-settings-tab="broker" onclick="switchSettingsTab('broker')">🏦 券商交易</button>
+                <button class="settings-tab" data-settings-tab="account" onclick="switchSettingsTab('account')">👤 Account</button>
             </div>
 
             <!-- LLM Tab -->
@@ -710,6 +711,25 @@
                         <input type="checkbox" id="broker-confirm" checked style="width:auto;margin:0;">
                         下单前需要确认
                     </span>
+                </label>
+            </div>
+
+            <!-- Account Tab -->
+            <div class="settings-tab-content" id="tab-account">
+                <label>Username
+                    <input id="account-username" type="text" placeholder="Display name">
+                </label>
+                <label>Email
+                    <input id="account-email" type="email" disabled>
+                </label>
+                <label>Current Password
+                    <input id="account-current-password" type="password" autocomplete="current-password" placeholder="Required to change password">
+                </label>
+                <label>New Password
+                    <input id="account-new-password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password">
+                </label>
+                <label>Confirm New Password
+                    <input id="account-confirm-password" type="password" autocomplete="new-password" placeholder="Repeat new password">
                 </label>
             </div>
 
@@ -1558,6 +1578,14 @@
             document.getElementById("broker-max-daily").value = cfg.max_daily_orders || 20;
             document.getElementById("broker-confirm").checked = cfg.require_confirmation !== false;
         });
+        // Load account info
+        fetch("/api/account").then(r => r.json()).then(user => {
+            document.getElementById("account-username").value = user.username || "";
+            document.getElementById("account-email").value = user.email || "";
+            document.getElementById("account-current-password").value = "";
+            document.getElementById("account-new-password").value = "";
+            document.getElementById("account-confirm-password").value = "";
+        });
         switchSettingsTab(tab || "llm");
         document.getElementById("settings-modal").classList.add("open");
     }
@@ -1567,11 +1595,12 @@
     }
 
     function switchSettingsTab(tab) {
-        document.querySelectorAll(".settings-tab").forEach(function(el, i) {
-            el.classList.toggle("active", (i === 0 && tab === "llm") || (i === 1 && tab === "broker"));
+        document.querySelectorAll(".settings-tab").forEach(function(el) {
+            el.classList.toggle("active", el.dataset.settingsTab === tab);
         });
         document.getElementById("tab-llm").classList.toggle("active", tab === "llm");
         document.getElementById("tab-broker").classList.toggle("active", tab === "broker");
+        document.getElementById("tab-account").classList.toggle("active", tab === "account");
     }
 
     function saveAllSettings() {
@@ -1596,12 +1625,45 @@
             require_confirmation: document.getElementById("broker-confirm").checked,
         };
 
+        const username = document.getElementById("account-username").value.trim();
+        const currentPassword = document.getElementById("account-current-password").value;
+        const newPassword = document.getElementById("account-new-password").value;
+        const confirmPassword = document.getElementById("account-confirm-password").value;
+        if (!username) {
+            alert("Username is required");
+            return;
+        }
+        if (newPassword !== confirmPassword) {
+            alert("New passwords do not match");
+            return;
+        }
+        const accountCfg = { username: username };
+        if (newPassword) {
+            accountCfg.current_password = currentPassword;
+            accountCfg.new_password = newPassword;
+        }
+
+        const parseSaveResponse = function(response) {
+            return response.json().then(data => {
+                if (!response.ok || data.error) throw new Error(data.error || "Save failed");
+                return data;
+            });
+        };
+
         Promise.all([
-            fetch("/api/llm-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(llmCfg) }),
-            fetch("/api/broker-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(brokerCfg) }),
-        ]).then(() => {
+            fetch("/api/llm-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(llmCfg) }).then(parseSaveResponse),
+            fetch("/api/broker-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(brokerCfg) }).then(parseSaveResponse),
+            fetch("/api/account", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(accountCfg) }).then(parseSaveResponse),
+        ]).then(results => {
+            const accountResult = results[2];
+            if (accountResult.user && accountResult.user.username) {
+                const displayName = document.getElementById("user-display-name");
+                if (displayName) displayName.textContent = "👤 " + accountResult.user.username;
+            }
             closeSettings();
             alert("✅ 设置已保存！");
+        }).catch(err => {
+            alert("❌ " + err.message);
         });
     }
 

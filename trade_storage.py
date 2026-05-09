@@ -212,6 +212,43 @@ def get_user_by_id(config: ToolkitConfig, user_id: int) -> dict | None:
         return {"id": row["id"], "email": row["email"], "username": row["display_name"]}
 
 
+def update_user_credentials(
+    config: ToolkitConfig,
+    user_id: int,
+    username: str,
+    current_password: str = "",
+    new_password: str = "",
+) -> dict:
+    username = username.strip()
+    if not username:
+        raise ValueError("Username is required")
+    if new_password and len(new_password) < 6:
+        raise ValueError("Password must be at least 6 characters")
+
+    with closing(_connect(config)) as conn:
+        row = conn.execute(
+            "SELECT id, email, password_hash FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("User not found")
+        if new_password and not check_password_hash(row["password_hash"], current_password):
+            raise ValueError("Current password is incorrect")
+
+        if new_password:
+            conn.execute(
+                "UPDATE users SET display_name = ?, password_hash = ? WHERE id = ?",
+                (username, generate_password_hash(new_password), user_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE users SET display_name = ? WHERE id = ?",
+                (username, user_id),
+            )
+        conn.commit()
+        return {"id": row["id"], "email": row["email"], "username": username}
+
+
 def get_user_llm_config(config: ToolkitConfig, user_id: int) -> dict:
     """Return the per-user LLM config as a dict (empty dict if not set)."""
     with closing(_connect(config)) as conn:

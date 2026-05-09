@@ -457,6 +457,35 @@ def llm_config_api():
     return jsonify(merged)
 
 
+@app.route("/api/account", methods=["GET", "POST"])
+@login_required
+def account_api():
+    config = ToolkitConfig()
+    trade_storage.ensure_storage(config)
+    uid = _uid()
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        try:
+            updated = trade_storage.update_user_credentials(
+                config=config,
+                user_id=uid,
+                username=str(payload.get("username", "")).strip(),
+                current_password=str(payload.get("current_password", "")),
+                new_password=str(payload.get("new_password", "")),
+            )
+            current_user.username = updated["username"]
+            return jsonify({"ok": True, "user": updated})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    row = trade_storage.get_user_by_id(config, uid)
+    if row is None:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify(row)
+
+
 # ── Broker config & order execution ────────────────────────────────────
 
 @app.route("/api/broker-config", methods=["GET", "POST"])
