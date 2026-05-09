@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 _lock = threading.Lock()
 # Cache TradingAgentsGraph instances keyed by (provider, model) so we reuse them
 _ta_instances: dict[str, object] = {}
-_TA_JOB_TIMEOUT_SECONDS = 15 * 60
+_TA_JOB_TIMEOUT_SECONDS = int(os.getenv("TA_JOB_TIMEOUT_SECONDS", str(20 * 60)))
 
 
 # ---------------------------------------------------------------------------
