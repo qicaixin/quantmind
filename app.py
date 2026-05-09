@@ -1237,7 +1237,7 @@ def ta_analysis_api():
         user_llm = trade_storage.get_user_llm_config(config, _uid())
         merged_llm = _load_global()
         for k, v in user_llm.items():
-            if v not in (None, ""):
+            if k == "model" or v not in (None, ""):
                 merged_llm[k] = v
         llm_err = ta_service._check_llm_reachable(merged_llm)
         if llm_err:
