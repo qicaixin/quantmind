@@ -857,6 +857,27 @@ def save_analysis_schedule(
     return get_analysis_schedule(config, user_id)
 
 
+def set_analysis_schedule_enabled(config: ToolkitConfig, user_id: int, enabled: bool) -> dict:
+    ensure_storage(config)
+    schedule = get_analysis_schedule(config, user_id)
+    if not schedule.get("symbols") or not schedule.get("types"):
+        raise ValueError("Schedule has no symbols or analysis types configured")
+    cron_expr = validate_cron_expr(schedule.get("cron_expr") or "0 */4 * * *")
+    next_run = next_cron_run(cron_expr).isoformat(timespec="seconds") if enabled else None
+    now = datetime.now().isoformat(timespec="seconds")
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            """
+            UPDATE analysis_schedules
+            SET enabled = ?, next_run = ?, updated_at = ?
+            WHERE user_id = ?
+            """,
+            (1 if enabled else 0, next_run, now, user_id),
+        )
+        conn.commit()
+    return get_analysis_schedule(config, user_id)
+
+
 def list_due_analysis_schedules(config: ToolkitConfig, now: datetime | None = None) -> list[dict]:
     ensure_storage(config)
     now_text = (now or datetime.now()).isoformat(timespec="seconds")

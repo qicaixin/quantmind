@@ -399,6 +399,20 @@
         .schedule-checks { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 12px; }
         .schedule-checks label { margin: 0; }
         .schedule-status { font-size: 12px; color: #6b7280; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
+        .schedule-clock-btn {
+            display: none;
+            width: auto;
+            padding: 8px 11px;
+            border-radius: 999px;
+            border: 1px solid #c7d2fe;
+            background: #eef2ff;
+            color: #3730a3;
+            font-size: 14px;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .schedule-clock-btn.visible { display: inline-flex; align-items: center; gap: 5px; }
+        .schedule-clock-btn.paused { background: #f3f4f6; border-color: #d1d5db; color: #6b7280; }
         .t0-auto-label { font-size: 12px; color: #6b7280; display: flex; align-items: center; gap: 4px; }
 
         /* Broker order button */
@@ -958,6 +972,7 @@
             </label>
             <div class="full-row">
                 <button type="submit" name="action" value="analyze" data-i18n="btn_analyze">Run Analysis</button>
+                <button type="button" class="schedule-clock-btn" data-schedule-clock onclick="toggleScheduleTrigger()" title="Pause/resume scheduled analysis">⏱</button>
                 <button type="button" class="broker-exec-btn" onclick="openManualOrderPanel()" style="font-size:12px;">🏦 手动下单</button>
             </div>
         </form>
@@ -1309,6 +1324,7 @@
             <button class="ta-latest-btn" onclick="loadTaLatest()">
                 ↺ Load Latest
             </button>
+            <button type="button" class="schedule-clock-btn" data-schedule-clock onclick="toggleScheduleTrigger()" title="Pause/resume scheduled analysis">⏱</button>
         </div>
     </div>
 
@@ -2108,17 +2124,19 @@
 
     function renderScheduleStatus(cfg) {
         const el = document.getElementById("schedule-status");
-        if (!el) return;
         const types = (cfg.types || []).join(", ") || "—";
         const symbols = (cfg.symbols || []).join(", ") || "—";
-        el.innerHTML = "状态：" + (cfg.enabled ? "已启用" : "未启用")
-            + "<br>股票：" + escHtml(symbols)
-            + "<br>类型：" + escHtml(types)
-            + "<br>Cron：" + escHtml(cfg.cron_expr || "—")
-            + "<br>纸面交易：" + (cfg.paper_trade_enabled ? "启用" : "未启用")
-            + "<br>上次运行：" + escHtml(cfg.last_run || "—")
-            + "<br>下次运行：" + escHtml(cfg.next_run || "—")
-            + (cfg.last_error ? "<br><span style='color:#b91c1c'>上次错误：" + escHtml(cfg.last_error) + "</span>" : "");
+        if (el) {
+            el.innerHTML = "状态：" + (cfg.enabled ? "已启用" : "已暂停")
+                + "<br>股票：" + escHtml(symbols)
+                + "<br>类型：" + escHtml(types)
+                + "<br>Cron：" + escHtml(cfg.cron_expr || "—")
+                + "<br>纸面交易：" + (cfg.paper_trade_enabled ? "启用" : "未启用")
+                + "<br>上次运行：" + escHtml(cfg.last_run || "—")
+                + "<br>下次运行：" + escHtml(cfg.next_run || "—")
+                + (cfg.last_error ? "<br><span style='color:#b91c1c'>上次错误：" + escHtml(cfg.last_error) + "</span>" : "");
+        }
+        renderScheduleClock(cfg);
     }
 
     function setScheduleCronFields(expr) {
@@ -2141,6 +2159,46 @@
         }
         input.value = value;
         input.disabled = true;
+    }
+
+    function scheduleIsConfigured(cfg) {
+        return !!(cfg && (cfg.symbols || []).length && (cfg.types || []).length);
+    }
+
+    function renderScheduleClock(cfg) {
+        document.querySelectorAll("[data-schedule-clock]").forEach(function(btn) {
+            if (!scheduleIsConfigured(cfg)) {
+                btn.classList.remove("visible");
+                return;
+            }
+            btn.classList.add("visible");
+            btn.classList.toggle("paused", !cfg.enabled);
+            btn.innerHTML = cfg.enabled ? "⏱ 暂停" : "⏸ 恢复";
+            btn.title = cfg.enabled
+                ? "Scheduled analysis is enabled. Click to pause."
+                : "Scheduled analysis is paused. Click to resume.";
+        });
+    }
+
+    function loadScheduleTriggerStatus() {
+        fetch("/api/analysis-schedule")
+            .then(r => r.json())
+            .then(cfg => renderScheduleStatus(cfg))
+            .catch(() => renderScheduleClock(null));
+    }
+
+    function toggleScheduleTrigger() {
+        fetch("/api/analysis-schedule/toggle", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+        })
+        .then(r => r.json().then(data => ({ ok: r.ok, data: data })))
+        .then(({ok, data}) => {
+            if (!ok || data.error) throw new Error(data.error || "Toggle failed");
+            renderScheduleStatus(data.schedule || {});
+        })
+        .catch(err => alert("❌ " + err.message));
     }
 
     function runScheduleNow() {
@@ -2697,6 +2755,7 @@
 
     // Load watchlist on page init
     loadWatchlist();
+    loadScheduleTriggerStatus();
 
     // ── Broker Order Execution Functions ─────────────────────────────────
 

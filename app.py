@@ -900,6 +900,24 @@ def analysis_schedule_run_now_api():
         return jsonify({"error": str(exc)}), 400
 
 
+@app.route("/api/analysis-schedule/toggle", methods=["POST"])
+@login_required
+def analysis_schedule_toggle_api():
+    config = ToolkitConfig()
+    trade_storage.ensure_storage(config)
+    payload = request.get_json(silent=True) or {}
+    try:
+        current = trade_storage.get_analysis_schedule(config, _uid())
+        enabled = payload.get("enabled")
+        target_enabled = (not current.get("enabled")) if enabled is None else bool(enabled)
+        schedule = trade_storage.set_analysis_schedule_enabled(config, _uid(), target_enabled)
+        return jsonify({"ok": True, "schedule": schedule})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.route("/api/account", methods=["GET", "POST"])
 @login_required
 def account_api():
