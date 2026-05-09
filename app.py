@@ -460,6 +460,7 @@ def _scheduler_loop() -> None:
                     config,
                     int(schedule["user_id"]),
                     interval_minutes=int(schedule.get("interval_minutes") or 240),
+                    cron_expr=schedule.get("cron_expr"),
                     error=error,
                 )
         except Exception as exc:
@@ -849,6 +850,7 @@ def analysis_schedule_api():
             if str(item).strip() in _SCHEDULE_ALLOWED_TYPES
         ]
         interval_minutes = max(15, int(payload.get("interval_minutes", 240)))
+        cron_expr = trade_storage.validate_cron_expr(str(payload.get("cron_expr") or "0 */4 * * *"))
         lang = "zh" if payload.get("lang", "zh") == "zh" else "en"
         enabled = bool(payload.get("enabled")) and bool(symbols) and bool(analysis_types)
         paper_trade_enabled = bool(payload.get("paper_trade_enabled"))
@@ -859,6 +861,7 @@ def analysis_schedule_api():
             symbols=symbols,
             analysis_types=analysis_types,
             interval_minutes=interval_minutes,
+            cron_expr=cron_expr,
             paper_trade_enabled=paper_trade_enabled,
             lang=lang,
         )
@@ -882,6 +885,7 @@ def analysis_schedule_run_now_api():
             config,
             uid,
             interval_minutes=int(schedule.get("interval_minutes") or 240),
+            cron_expr=schedule.get("cron_expr"),
             error=None,
         )
         return jsonify({"ok": True, "result": result, "schedule": trade_storage.get_analysis_schedule(config, uid)})
@@ -890,6 +894,7 @@ def analysis_schedule_run_now_api():
             config,
             uid,
             interval_minutes=int(schedule.get("interval_minutes") or 240),
+            cron_expr=schedule.get("cron_expr"),
             error=str(exc),
         )
         return jsonify({"error": str(exc)}), 400

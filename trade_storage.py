@@ -198,6 +198,7 @@ def ensure_storage(config: ToolkitConfig) -> None:
                 types_json TEXT NOT NULL DEFAULT '[]',
                 paper_trade_enabled INTEGER NOT NULL DEFAULT 0,
                 interval_minutes INTEGER NOT NULL DEFAULT 240,
+                cron_expr TEXT NOT NULL DEFAULT '0 */4 * * *',
                 lang TEXT NOT NULL DEFAULT 'zh',
                 last_run TEXT,
                 next_run TEXT,
@@ -514,6 +515,7 @@ def _migrate_schema(config: ToolkitConfig) -> None:
             ("users", "llm_config_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("users", "broker_config_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("analysis_schedules", "paper_trade_enabled", "INTEGER NOT NULL DEFAULT 0"),
+            ("analysis_schedules", "cron_expr", "TEXT NOT NULL DEFAULT '0 */4 * * *'"),
         ]
         for table, column, col_type in migrations:
             try:
@@ -719,12 +721,89 @@ def get_analysis_schedule(config: ToolkitConfig, user_id: int) -> dict:
             "types": ["kronos"],
             "paper_trade_enabled": False,
             "interval_minutes": 240,
+            "cron_expr": "0 */4 * * *",
             "lang": "zh",
             "last_run": None,
             "next_run": None,
             "last_error": None,
         }
     return _schedule_row_to_dict(row)
+
+
+def validate_cron_expr(expr: str) -> str:
+    expr = " ".join((expr or "").strip().split())
+    if not expr:
+        raise ValueError("Cron expression is required")
+    parts = expr.split(" ")
+    if len(parts) != 5:
+        raise ValueError("Cron expression must have 5 fields: minute hour day month weekday")
+    ranges = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
+    for field, (min_value, max_value) in zip(parts, ranges):
+        _parse_cron_field(field, min_value, max_value)
+    return expr
+
+
+def _parse_cron_field(field: str, min_value: int, max_value: int) -> set[int]:
+    values: set[int] = set()
+    for item in field.split(","):
+        item = item.strip()
+        if not item:
+            raise ValueError(f"Invalid cron field: {field}")
+        base = item
+        step = 1
+        if "/" in item:
+            base, step_text = item.split("/", 1)
+            if not step_text.isdigit() or int(step_text) <= 0:
+                raise ValueError(f"Invalid cron step: {item}")
+            step = int(step_text)
+        if base == "*":
+            start, end = min_value, max_value
+        elif "-" in base:
+            start_text, end_text = base.split("-", 1)
+            if not start_text.isdigit() or not end_text.isdigit():
+                raise ValueError(f"Invalid cron range: {item}")
+            start, end = int(start_text), int(end_text)
+        elif base.isdigit():
+            start = end = int(base)
+        else:
+            raise ValueError(f"Invalid cron field: {item}")
+        if start < min_value or end > max_value or start > end:
+            raise ValueError(f"Cron value out of range: {item}")
+        values.update(range(start, end + 1, step))
+    if max_value == 7 and 7 in values:
+        values.add(0)
+    return values
+
+
+def _cron_field_is_wildcard(field: str) -> bool:
+    return field == "*" or field.startswith("*/")
+
+
+def _cron_matches(expr: str, dt: datetime) -> bool:
+    minute, hour, dom, month, dow = expr.split()
+    if dt.minute not in _parse_cron_field(minute, 0, 59):
+        return False
+    if dt.hour not in _parse_cron_field(hour, 0, 23):
+        return False
+    if dt.month not in _parse_cron_field(month, 1, 12):
+        return False
+    dom_match = dt.day in _parse_cron_field(dom, 1, 31)
+    cron_dow = (dt.weekday() + 1) % 7
+    dow_match = cron_dow in _parse_cron_field(dow, 0, 7)
+    if not _cron_field_is_wildcard(dom) and not _cron_field_is_wildcard(dow):
+        return dom_match or dow_match
+    return dom_match and dow_match
+
+
+def next_cron_run(expr: str, after: datetime | None = None) -> datetime:
+    expr = validate_cron_expr(expr)
+    cursor = (after or datetime.now()).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    max_checks = 366 * 24 * 60
+    for _ in range(max_checks):
+        if _cron_matches(expr, cursor):
+            return cursor
+        cursor += timedelta(minutes=1)
+    raise ValueError("Unable to find next run within one year for cron expression")
 
 
 def save_analysis_schedule(
@@ -735,30 +814,28 @@ def save_analysis_schedule(
     symbols: list[str],
     analysis_types: list[str],
     interval_minutes: int,
+    cron_expr: str = "0 */4 * * *",
     paper_trade_enabled: bool = False,
     lang: str = "zh",
 ) -> dict:
     ensure_storage(config)
     now = datetime.now()
-    existing = get_analysis_schedule(config, user_id)
-    next_run = existing.get("next_run")
-    if enabled and not next_run:
-        next_run = now.isoformat(timespec="seconds")
-    if not enabled:
-        next_run = None
+    cron_expr = validate_cron_expr(cron_expr)
+    next_run = next_cron_run(cron_expr, now).isoformat(timespec="seconds") if enabled else None
     with closing(_connect(config)) as conn:
         conn.execute(
             """
             INSERT INTO analysis_schedules (
                 user_id, enabled, symbols_csv, types_json, paper_trade_enabled,
-                interval_minutes, lang, next_run, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                interval_minutes, cron_expr, lang, next_run, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 enabled = excluded.enabled,
                 symbols_csv = excluded.symbols_csv,
                 types_json = excluded.types_json,
                 paper_trade_enabled = excluded.paper_trade_enabled,
                 interval_minutes = excluded.interval_minutes,
+                cron_expr = excluded.cron_expr,
                 lang = excluded.lang,
                 next_run = excluded.next_run,
                 updated_at = excluded.updated_at
@@ -770,6 +847,7 @@ def save_analysis_schedule(
                 json.dumps(analysis_types, ensure_ascii=False),
                 1 if paper_trade_enabled else 0,
                 interval_minutes,
+                cron_expr,
                 lang,
                 next_run,
                 now.isoformat(timespec="seconds"),
@@ -803,11 +881,15 @@ def mark_analysis_schedule_run(
     user_id: int,
     *,
     interval_minutes: int,
+    cron_expr: str | None = None,
     error: str | None = None,
 ) -> None:
     ensure_storage(config)
     now = datetime.now()
-    next_run = now + timedelta(minutes=max(15, int(interval_minutes)))
+    if cron_expr:
+        next_run = next_cron_run(cron_expr, now)
+    else:
+        next_run = now + timedelta(minutes=max(15, int(interval_minutes)))
     with closing(_connect(config)) as conn:
         conn.execute(
             """
@@ -839,6 +921,7 @@ def _schedule_row_to_dict(row: sqlite3.Row) -> dict:
         "types": analysis_types,
         "paper_trade_enabled": bool(row["paper_trade_enabled"]),
         "interval_minutes": int(row["interval_minutes"]),
+        "cron_expr": row["cron_expr"],
         "lang": row["lang"],
         "last_run": row["last_run"],
         "next_run": row["next_run"],

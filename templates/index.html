@@ -839,12 +839,17 @@
                 <label>股票列表（逗号分隔）
                     <input id="schedule-symbols" type="text" placeholder="例如：600938, 601169">
                 </label>
-                <label>触发频率
-                    <select id="schedule-interval">
-                        <option value="60">每 1 小时</option>
-                        <option value="240">每 4 小时</option>
-                        <option value="1440">每天</option>
+                <label>Cron 触发器
+                    <select id="schedule-cron-preset" onchange="onScheduleCronPresetChange(this.value)">
+                        <option value="0 * * * *">每小时整点</option>
+                        <option value="0 */4 * * *">每 4 小时</option>
+                        <option value="30 15 * * 1-5">每个交易日 15:30</option>
+                        <option value="0 9 * * 1-5">每个交易日 09:00</option>
+                        <option value="custom">自定义 Cron</option>
                     </select>
+                </label>
+                <label>Cron 表达式（分钟 小时 日 月 星期）
+                    <input id="schedule-cron-expr" type="text" placeholder="例如：30 15 * * 1-5">
                 </label>
                 <label>Trade-Agent 语言
                     <select id="schedule-lang">
@@ -1994,7 +1999,7 @@
         fetch("/api/analysis-schedule").then(r => r.json()).then(cfg => {
             document.getElementById("schedule-enabled").checked = !!cfg.enabled;
             document.getElementById("schedule-symbols").value = (cfg.symbols || []).join(", ");
-            document.getElementById("schedule-interval").value = String(cfg.interval_minutes || 240);
+            setScheduleCronFields(cfg.cron_expr || "0 */4 * * *");
             document.getElementById("schedule-lang").value = cfg.lang || "zh";
             const types = cfg.types || [];
             document.getElementById("schedule-type-kronos").checked = types.includes("kronos");
@@ -2068,7 +2073,8 @@
         const scheduleCfg = {
             enabled: document.getElementById("schedule-enabled").checked,
             symbols: document.getElementById("schedule-symbols").value.split(",").map(s => s.trim()).filter(Boolean),
-            interval_minutes: parseInt(document.getElementById("schedule-interval").value) || 240,
+            interval_minutes: 240,
+            cron_expr: document.getElementById("schedule-cron-expr").value.trim(),
             lang: document.getElementById("schedule-lang").value || "zh",
             types: scheduleTypes,
             paper_trade_enabled: document.getElementById("schedule-paper-trade").checked,
@@ -2108,10 +2114,33 @@
         el.innerHTML = "状态：" + (cfg.enabled ? "已启用" : "未启用")
             + "<br>股票：" + escHtml(symbols)
             + "<br>类型：" + escHtml(types)
+            + "<br>Cron：" + escHtml(cfg.cron_expr || "—")
             + "<br>纸面交易：" + (cfg.paper_trade_enabled ? "启用" : "未启用")
             + "<br>上次运行：" + escHtml(cfg.last_run || "—")
             + "<br>下次运行：" + escHtml(cfg.next_run || "—")
             + (cfg.last_error ? "<br><span style='color:#b91c1c'>上次错误：" + escHtml(cfg.last_error) + "</span>" : "");
+    }
+
+    function setScheduleCronFields(expr) {
+        const preset = document.getElementById("schedule-cron-preset");
+        const input = document.getElementById("schedule-cron-expr");
+        if (!preset || !input) return;
+        const found = Array.from(preset.options).some(opt => opt.value === expr);
+        preset.value = found ? expr : "custom";
+        input.value = expr;
+        input.disabled = preset.value !== "custom";
+    }
+
+    function onScheduleCronPresetChange(value) {
+        const input = document.getElementById("schedule-cron-expr");
+        if (!input) return;
+        if (value === "custom") {
+            input.disabled = false;
+            input.focus();
+            return;
+        }
+        input.value = value;
+        input.disabled = true;
     }
 
     function runScheduleNow() {
