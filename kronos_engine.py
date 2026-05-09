@@ -9,11 +9,11 @@ import torch
 from config import ToolkitConfig
 from data_sources import future_trading_days
 
-_PREDICTOR_CACHE: dict[tuple[str, str], object] = {}
+_PREDICTOR_CACHE: dict[tuple[str, str, int], object] = {}
 
 
 def load_predictor(config: ToolkitConfig, device: str = "cpu"):
-    cache_key = (str(config.kronos_root), device)
+    cache_key = (str(config.kronos_root), device, config.max_context)
     if cache_key in _PREDICTOR_CACHE:
         return _PREDICTOR_CACHE[cache_key]
 
