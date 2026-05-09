@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING
 from config import ToolkitConfig
 from llm_service import (
     _get_proxy_url,
+    api_base_from_endpoint_url,
     chat_completions_url,
+    endpoint_url_candidates,
     load_llm_config,
     resolve_llm_model,
 )
@@ -100,16 +102,24 @@ def _check_llm_reachable(llm_cfg: dict) -> str | None:
         return "Could not auto-detect an LLM model. Please fill the model name in ⚙ Settings."
 
     llm_cfg["model"] = model
-    probe_url = chat_completions_url(base_url)
     probe_body = {
         "model": model,
         "messages": [{"role": "user", "content": "hi"}],
         "max_tokens": 1,
     }
     try:
-        resp = requests.post(probe_url, json=probe_body, headers=headers,
-                             proxies=proxies, verify=False, timeout=20)
+        last_probe_url = chat_completions_url(base_url)
+        resp = None
+        for probe_url in endpoint_url_candidates(base_url, "chat/completions"):
+            last_probe_url = probe_url
+            resp = requests.post(probe_url, json=probe_body, headers=headers,
+                                 proxies=proxies, verify=False, timeout=20)
+            if resp.status_code != 404:
+                break
+        if resp is None:
+            return "LLM pre-flight failed: request was not sent."
         if resp.status_code in (200, 201):
+            llm_cfg["base_url"] = api_base_from_endpoint_url(last_probe_url, "chat/completions")
             return None
         try:
             data = resp.json() if resp.content else {}
@@ -133,7 +143,7 @@ def _check_llm_reachable(llm_cfg: dict) -> str | None:
             return f"API key rejected (401). Please update it in ⚙ Settings."
         return f"LLM API error {resp.status_code}: {err_msg}"
     except requests.exceptions.Timeout:
-        return f"LLM API timed out at {probe_url}. Check network/proxy."
+        return f"LLM API timed out at {last_probe_url}. Check network/proxy."
     except requests.exceptions.ConnectionError as e:
         return f"Cannot reach LLM API at {base_url}. Check URL in ⚙ Settings."
     except Exception as e:

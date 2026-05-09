@@ -100,6 +100,31 @@ def models_url(base_url: str) -> str:
     return _openai_compatible_url(base_url, "models")
 
 
+def endpoint_url_candidates(base_url: str, endpoint: str) -> list[str]:
+    """Return likely endpoint URLs for OpenAI-compatible APIs.
+
+    Most providers use /v1, but some gateways expose chat/models directly at
+    the configured root. Try the standard URL first, then the root variant.
+    """
+    normalized = base_url.rstrip("/")
+    candidates = [_openai_compatible_url(normalized, endpoint)]
+    if normalized.endswith(f"/{endpoint.lstrip('/')}"):
+        root_candidate = normalized
+    else:
+        root_candidate = f"{_service_root_url(normalized)}/{endpoint.lstrip('/')}"
+    if root_candidate not in candidates:
+        candidates.append(root_candidate)
+    return candidates
+
+
+def api_base_from_endpoint_url(url: str, endpoint: str) -> str:
+    suffix = f"/{endpoint.lstrip('/')}"
+    normalized = url.rstrip("/")
+    if normalized.endswith(suffix):
+        return normalized[: -len(suffix)]
+    return normalized
+
+
 def _request_options(base_url: str) -> tuple[dict, bool]:
     if _is_local_url(base_url):
         return {"http": None, "https": None}, True
@@ -180,12 +205,16 @@ def resolve_llm_model(config: dict) -> str:
         headers["Authorization"] = f"Bearer {api_key}"
 
     try:
-        resp = requests.get(models_url(base_url), headers=headers, proxies=proxies, verify=verify, timeout=15)
-        if resp.status_code == 200:
-            selected = _select_chat_model(_model_ids_from_response(resp.json()))
-            if selected:
-                _MODEL_CACHE[cache_key] = selected
-                return selected
+        for url in endpoint_url_candidates(base_url, "models"):
+            resp = requests.get(url, headers=headers, proxies=proxies, verify=verify, timeout=15)
+            if resp.status_code == 200:
+                selected = _select_chat_model(_model_ids_from_response(resp.json()))
+                if selected:
+                    config["base_url"] = api_base_from_endpoint_url(url, "models")
+                    _MODEL_CACHE[cache_key] = selected
+                    return selected
+            if resp.status_code != 404:
+                break
     except (requests.exceptions.RequestException, ValueError):
         pass
 
@@ -205,7 +234,6 @@ def resolve_llm_model(config: dict) -> str:
             pass
         return _DEFAULT_CONFIG["model"]
 
-    probe_url = chat_completions_url(base_url)
     for candidate in _MODEL_PROBE_CANDIDATES:
         payload = {
             "model": candidate,
@@ -214,19 +242,23 @@ def resolve_llm_model(config: dict) -> str:
             "stream": False,
         }
         try:
-            resp = requests.post(
-                probe_url,
-                headers=headers,
-                json=payload,
-                proxies=proxies,
-                verify=verify,
-                timeout=20,
-            )
-            if resp.status_code in (200, 201):
-                _MODEL_CACHE[cache_key] = candidate
-                return candidate
-            if resp.status_code == 401:
-                return ""
+            for probe_url in endpoint_url_candidates(base_url, "chat/completions"):
+                resp = requests.post(
+                    probe_url,
+                    headers=headers,
+                    json=payload,
+                    proxies=proxies,
+                    verify=verify,
+                    timeout=20,
+                )
+                if resp.status_code in (200, 201):
+                    config["base_url"] = api_base_from_endpoint_url(probe_url, "chat/completions")
+                    _MODEL_CACHE[cache_key] = candidate
+                    return candidate
+                if resp.status_code == 401:
+                    return ""
+                if resp.status_code != 404:
+                    break
         except requests.exceptions.RequestException:
             return ""
     return ""
@@ -279,7 +311,6 @@ def call_llm(system_prompt: str, user_prompt: str, *, config_override: dict | No
     if not model:
         return "❌ 无法自动识别模型，请在设置中手动填写模型名称。"
 
-    url = chat_completions_url(base_url)
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -298,16 +329,23 @@ def call_llm(system_prompt: str, user_prompt: str, *, config_override: dict | No
     proxies, verify = _request_options(base_url)
 
     try:
-        resp = requests.post(url, headers=headers, json=payload,
-                             proxies=proxies, verify=verify, timeout=60)
-        resp.encoding = "utf-8"
-        if resp.status_code == 200:
-            return resp.json()["choices"][0]["message"]["content"].strip()
-        if resp.status_code == 401:
+        last_resp = None
+        for url in endpoint_url_candidates(base_url, "chat/completions"):
+            resp = requests.post(url, headers=headers, json=payload,
+                                 proxies=proxies, verify=verify, timeout=60)
+            last_resp = resp
+            resp.encoding = "utf-8"
+            if resp.status_code == 200:
+                return resp.json()["choices"][0]["message"]["content"].strip()
+            if resp.status_code != 404:
+                break
+        if last_resp is None:
+            return "❌ LLM API 请求未发送。"
+        if last_resp.status_code == 401:
             return "❌ API Key 无效或已过期，请在设置中更新。"
-        if resp.status_code == 404:
-            return f"❌ 模型 '{model}' 未找到，请检查设置中的模型名称。"
-        return f"❌ LLM API 错误 {resp.status_code}：{resp.text[:300]}"
+        if last_resp.status_code == 404:
+            return f"❌ 模型 '{model}' 未找到或 API 地址不正确，请检查设置中的模型名称和 Base URL。"
+        return f"❌ LLM API 错误 {last_resp.status_code}：{last_resp.text[:300]}"
 
     except requests.exceptions.ConnectionError as e:
         err = str(e)
