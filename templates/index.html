@@ -902,7 +902,7 @@
     {% endif %}
 
     {% if result %}
-    <div class="results">
+    <div class="results server-analysis-output">
         {% set rec = result.prediction.recommendation %}
         {% set summary = result.prediction.summary %}
         {% set bt = result.backtest.summary %}
@@ -1130,13 +1130,13 @@
         </div>
     </div>
 
-    <div class="panel">
+    <div class="panel server-analysis-output">
         <h2 data-i18n="forecast_chart">Forecast Chart</h2>
         <img src="/outputs/{{ result.prediction.forecast_image }}" alt="Forecast chart">
     </div>
 
     {% if trade_result and trade_result.paper %}
-    <div class="panel">
+    <div class="panel server-analysis-output">
         <h2 data-i18n="paper_trade_result">Paper Trade Result</h2>
         <table class="metrics">
             {% for key, value in trade_result.paper.trade.items() %}
@@ -1168,7 +1168,7 @@
     {% endif %}
 
     {% if trade_result and trade_result.live %}
-    <div class="panel">
+    <div class="panel server-analysis-output">
         <h2 data-i18n="live_order_export">Manual Live Order Export</h2>
         <table class="metrics">
             {% for key, value in trade_result.live.order.items() %}
@@ -1296,6 +1296,7 @@
 
 <script>
     let currentAnalysisId = "{{ result.analysis_id if result and result.analysis_id else '' }}";
+    const renderedAnalysisSymbol = "{{ result.prediction.summary.symbol if result else '' }}";
     const I18N = {
         en: {
             title: "Kronos + Qlib Stock Analyzer",
@@ -2299,6 +2300,18 @@
         return Number.isFinite(n) && n > 0 ? "up" : (Number.isFinite(n) && n < 0 ? "down" : "");
     }
 
+    function stockDigits(symbol) {
+        return String(symbol || "").replace(/\D/g, "").slice(-6);
+    }
+
+    function clearRenderedAnalysisIfStale(symbol) {
+        if (renderedAnalysisSymbol && stockDigits(renderedAnalysisSymbol) === stockDigits(symbol)) return;
+        currentAnalysisId = "";
+        document.querySelectorAll(".server-analysis-output").forEach(function(el) {
+            el.style.display = "none";
+        });
+    }
+
     function renderLatestAnalysis(run) {
         var panel = document.getElementById("latest-analysis-panel");
         var content = document.getElementById("latest-analysis-content");
@@ -2343,6 +2356,7 @@
     function loadLatestForWatchlistSymbol(symbol) {
         var panel = document.getElementById("latest-analysis-panel");
         var content = document.getElementById("latest-analysis-content");
+        currentAnalysisId = "";
         panel.classList.add("visible");
         content.innerHTML = "⏳ Loading latest saved analysis...";
         return fetch("/api/analysis-latest/" + encodeURIComponent(symbol))
@@ -2436,6 +2450,7 @@
     function selectWatchlistItem(symbol) {
         watchlistActiveSymbol = symbol;
         renderWatchlist();
+        clearRenderedAnalysisIfStale(symbol);
 
         var symbolInput = document.getElementById("symbol");
         if (symbolInput) {
