@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import os
+import queue
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from config import ToolkitConfig
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 _lock = threading.Lock()
 # Cache TradingAgentsGraph instances keyed by (provider, model) so we reuse them
 _ta_instances: dict[str, object] = {}
+_TA_JOB_TIMEOUT_SECONDS = 15 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +240,8 @@ def _patch_tradingagents_custom_openai_chat_completions() -> None:
                 "model": self.model,
                 "base_url": self.base_url,
                 "use_responses_api": False,
+                "timeout": self.kwargs.get("timeout", 90),
+                "max_retries": self.kwargs.get("max_retries", 1),
             }
             api_key = self.kwargs.get("api_key") or os.environ.get("OPENAI_API_KEY")
             if api_key:
@@ -258,6 +262,42 @@ def _patch_tradingagents_custom_openai_chat_completions() -> None:
 
     trading_graph.create_llm_client = create_llm_client
     trading_graph._quantmind_chat_completions_patch = True
+
+
+def _run_with_timeout(func, timeout_seconds: int):
+    result_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    def target():
+        try:
+            result_queue.put(("ok", func()))
+        except Exception as exc:
+            result_queue.put(("error", exc))
+
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    try:
+        status, payload = result_queue.get(timeout=timeout_seconds)
+    except queue.Empty as exc:
+        raise TimeoutError(
+            "TradingAgents analysis timed out. It is likely blocked in an external "
+            "data/LLM call; try again later or use a shorter analysis scope."
+        ) from exc
+    if status == "error":
+        raise payload
+    return payload
+
+
+def _is_stale_running_job(job: dict) -> bool:
+    if job.get("status") != "running":
+        return False
+    created_at = job.get("created_at")
+    if not created_at:
+        return False
+    try:
+        created = datetime.fromisoformat(str(created_at))
+    except ValueError:
+        return False
+    return datetime.now() - created > timedelta(seconds=_TA_JOB_TIMEOUT_SECONDS)
 
 
 def _build_ta_config(llm_cfg: dict, *, lang: str = "en") -> dict:
@@ -359,7 +399,16 @@ def _run_job(job_id: str, symbol: str, trade_date: str, config: ToolkitConfig, *
         # Restore proxy env vars so yfinance can reach Yahoo Finance
         # (akshare clears HTTP_PROXY/HTTPS_PROXY on import)
         with _proxy_env():
-            final_state, decision = ta.propagate(ticker, trade_date)
+            try:
+                final_state, decision = _run_with_timeout(
+                    lambda: ta.propagate(ticker, trade_date),
+                    _TA_JOB_TIMEOUT_SECONDS,
+                )
+            except TimeoutError as exc:
+                with _lock:
+                    _ta_instances.pop(key, None)
+                update_ta_job(config, job_id, status="failed", error=str(exc))
+                return
 
         reports = {
             "market_report":        final_state.get("market_report", ""),
@@ -407,8 +456,20 @@ def submit_job(config: ToolkitConfig, symbol: str, trade_date: str | None = None
 
 def get_job(config: ToolkitConfig, job_id: str) -> dict | None:
     """Load a TA job's status and result from SQLite."""
-    from trade_storage import load_ta_job
-    return load_ta_job(config, job_id)
+    from trade_storage import load_ta_job, update_ta_job
+    job = load_ta_job(config, job_id)
+    if job and _is_stale_running_job(job):
+        update_ta_job(
+            config,
+            job_id,
+            status="failed",
+            error=(
+                "TradingAgents analysis timed out. It likely got stuck in an "
+                "external data/LLM call."
+            ),
+        )
+        return load_ta_job(config, job_id)
+    return job
 
 
 def get_latest(config: ToolkitConfig, symbol: str, *, user_id: int = 1) -> dict | None:
