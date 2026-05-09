@@ -183,6 +183,19 @@
             color: #2563eb;
             font-weight: 700;
         }
+        .latest-analysis-panel {
+            display: none;
+            border: 1px solid #e0e7ff;
+            background: #f8fafc;
+        }
+        .latest-analysis-panel.visible {
+            display: block;
+        }
+        .latest-meta {
+            color: #6b7280;
+            font-size: 13px;
+            margin-bottom: 10px;
+        }
         .links a:hover {
             text-decoration: underline;
         }
@@ -879,6 +892,11 @@
         </div>
     </div>
 
+    <div class="panel latest-analysis-panel" id="latest-analysis-panel">
+        <h2 data-i18n="latest_analysis_title">Latest saved analysis</h2>
+        <div id="latest-analysis-content" class="latest-meta"></div>
+    </div>
+
     {% if error %}
     <div class="panel error">{{ error }}</div>
     {% endif %}
@@ -1277,7 +1295,7 @@
 </div> <!-- /app-layout -->
 
 <script>
-    const CURRENT_ANALYSIS_ID = "{{ result.analysis_id if result and result.analysis_id else '' }}";
+    let currentAnalysisId = "{{ result.analysis_id if result and result.analysis_id else '' }}";
     const I18N = {
         en: {
             title: "Kronos + Qlib Stock Analyzer",
@@ -1379,6 +1397,10 @@
             watchlist_add: "+ Add",
             watchlist_placeholder: "Stock code",
             watchlist_empty: "No stocks in watchlist",
+            latest_analysis_title: "Latest saved analysis",
+            latest_no_analysis: "No saved Kronos analysis yet. Click Run Analysis to create one.",
+            latest_loaded_prefix: "Loaded saved analysis",
+            latest_ta_missing: "No previous TradingAgents analysis found for this symbol.",
         },
         zh: {
             title: "Kronos + Qlib 股票分析工具",
@@ -1480,6 +1502,10 @@
             watchlist_add: "+ 添加",
             watchlist_placeholder: "输入股票代码",
             watchlist_empty: "暂无自选股",
+            latest_analysis_title: "最近保存的分析",
+            latest_no_analysis: "还没有保存的 Kronos 分析。点击“运行分析”后会自动保存。",
+            latest_loaded_prefix: "已加载保存的分析",
+            latest_ta_missing: "该股票暂无历史 TradingAgents 分析。",
         }
     };
 
@@ -2132,10 +2158,21 @@
     function loadTaLatest() {
         var symbol = (document.getElementById("ta-symbol").value || "").trim();
         if (!symbol) { alert("Enter a symbol to load the latest analysis."); return; }
-        fetch("/api/ta-latest/" + symbol)
+        loadTaLatestForSymbol(symbol, false);
+    }
+
+    function loadTaLatestForSymbol(symbol, quiet) {
+        fetch("/api/ta-latest/" + encodeURIComponent(symbol))
         .then(r => r.json())
         .then(data => {
-            if (data.error) { taSetStatus("failed", "No previous analysis found for " + symbol); return; }
+            if (data.error) {
+                if (!quiet) taSetStatus("failed", "No previous analysis found for " + symbol);
+                else taSetStatus("failed", I18N[currentLang].latest_ta_missing || "No previous TradingAgents analysis found for this symbol.");
+                document.getElementById("ta-consensus").style.display = "none";
+                document.getElementById("ta-broker-action").style.display = "none";
+                document.getElementById("ta-reports").innerHTML = '<div class="ta-empty">' + escHtml(I18N[currentLang].latest_ta_missing || "No previous TradingAgents analysis found for this symbol.") + '</div>';
+                return;
+            }
             taSetStatus("done", "✅ Loaded latest analysis for " + data.symbol
                 + " (" + (data.trade_date || "") + ")");
             taRenderReports(data);
@@ -2146,7 +2183,7 @@
 
     function taLoadConsensus(symbol, taDecision) {
         var url = "/api/consensus/" + symbol;
-        if (CURRENT_ANALYSIS_ID) url += "?analysis_id=" + encodeURIComponent(CURRENT_ANALYSIS_ID);
+        if (currentAnalysisId) url += "?analysis_id=" + encodeURIComponent(currentAnalysisId);
         fetch(url)
         .then(r => r.json())
         .then(data => {
@@ -2251,6 +2288,78 @@
             .replace(/>/g, "&gt;");
     }
 
+    function fmtPct(v) {
+        if (v === null || v === undefined || v === "") return "—";
+        var n = Number(v);
+        return Number.isFinite(n) ? n.toFixed(2) + "%" : escHtml(v);
+    }
+
+    function pctClass(v) {
+        var n = Number(v);
+        return Number.isFinite(n) && n > 0 ? "up" : (Number.isFinite(n) && n < 0 ? "down" : "");
+    }
+
+    function renderLatestAnalysis(run) {
+        var panel = document.getElementById("latest-analysis-panel");
+        var content = document.getElementById("latest-analysis-content");
+        var t = I18N[currentLang];
+        if (!run || !run.result) {
+            currentAnalysisId = "";
+            panel.classList.add("visible");
+            content.innerHTML = escHtml(t.latest_no_analysis || "No saved Kronos analysis yet.");
+            return;
+        }
+
+        var result = run.result;
+        currentAnalysisId = result.analysis_id || run.id || "";
+        var summary = (result.prediction && result.prediction.summary) || {};
+        var rec = (result.prediction && result.prediction.recommendation) || {};
+        var bt = (result.backtest && result.backtest.summary) || {};
+        var action = rec.action || "HOLD";
+        var actionCls = action === "BUY" ? "action-buy" : (action === "SELL" ? "action-sell" : "action-hold");
+        var actionIcon = action === "BUY" ? "🟢" : (action === "SELL" ? "🔴" : "🟡");
+
+        panel.classList.add("visible");
+        content.innerHTML =
+            '<div class="latest-meta">' + escHtml(t.latest_loaded_prefix || "Loaded saved analysis") + ': '
+                + escHtml(run.created_at || "") + '</div>' +
+            '<div class="decision-header">' +
+                '<div><strong>' + escHtml(summary.label || summary.symbol || run.symbol || "") + '</strong>' +
+                '<div class="latest-meta">' + escHtml(summary.symbol || run.symbol || "") + ' · ' + escHtml(summary.last_trade_date || "") + '</div></div>' +
+                '<div class="action-badge ' + actionCls + '">' + actionIcon + ' ' + escHtml(action) + '</div>' +
+            '</div>' +
+            '<div class="metric-grid">' +
+                '<div class="metric-card"><div class="metric-label">' + escHtml(t.expected_return || "Expected Return") + '</div><div class="metric-value ' + pctClass(rec.predicted_return_pct) + '">' + fmtPct(rec.predicted_return_pct) + '</div></div>' +
+                '<div class="metric-card"><div class="metric-label">' + escHtml(t.predicted_close || "Predicted End Close") + '</div><div class="metric-value">' + escHtml(rec.predicted_end_close || "—") + '</div></div>' +
+                '<div class="metric-card"><div class="metric-label">' + escHtml(t.strategy_return || "Strategy Return") + '</div><div class="metric-value ' + pctClass(bt.strategy_return_pct) + '">' + fmtPct(bt.strategy_return_pct) + '</div></div>' +
+                '<div class="metric-card"><div class="metric-label">' + escHtml(t.max_drawdown || "Max Drawdown") + '</div><div class="metric-value down">' + fmtPct(bt.max_drawdown_pct) + '</div></div>' +
+            '</div>' +
+            '<div class="links" style="margin-top:12px;">' +
+                (result.prediction && result.prediction.summary_file ? '<a href="/outputs/' + escHtml(result.prediction.summary_file) + '" target="_blank">' + escHtml(t.link_summary_json || "Summary JSON") + '</a>' : '') +
+                (result.backtest && result.backtest.summary_file ? '<a href="/outputs/' + escHtml(result.backtest.summary_file) + '" target="_blank">' + escHtml(t.link_backtest_json || "Backtest JSON") + '</a>' : '') +
+            '</div>';
+    }
+
+    function loadLatestForWatchlistSymbol(symbol) {
+        var panel = document.getElementById("latest-analysis-panel");
+        var content = document.getElementById("latest-analysis-content");
+        panel.classList.add("visible");
+        content.innerHTML = "⏳ Loading latest saved analysis...";
+        return fetch("/api/analysis-latest/" + encodeURIComponent(symbol))
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) {
+                    renderLatestAnalysis(null);
+                    return;
+                }
+                renderLatestAnalysis(data);
+            })
+            .catch(e => {
+                currentAnalysisId = "";
+                content.innerHTML = "❌ " + escHtml(e);
+            });
+    }
+
     // ── Watchlist ────────────────────────────────────────────────────
     var watchlistData = [];
     var watchlistActiveSymbol = "";
@@ -2335,6 +2444,9 @@
         }
         var taInput = document.getElementById("ta-symbol");
         if (taInput) taInput.value = symbol;
+        loadLatestForWatchlistSymbol(symbol).finally(function() {
+            loadTaLatestForSymbol(symbol, true);
+        });
     }
 
     // Enter key support for watchlist input

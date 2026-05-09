@@ -381,6 +381,21 @@ def analyze_api():
         return jsonify({"error": str(exc)}), 400
 
 
+@app.route("/api/analysis-latest/<symbol>")
+@login_required
+def analysis_latest_api(symbol: str):
+    try:
+        sym = normalize_symbol(symbol.strip())
+        config = ToolkitConfig()
+        trade_storage.ensure_storage(config)
+        run = trade_storage.get_latest_analysis_run(config, _uid(), sym)
+        if run is None:
+            return jsonify({"error": "No saved analysis found"}), 404
+        return jsonify(run)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.route("/api/paper-trade", methods=["POST"])
 @login_required
 def paper_trade_api():

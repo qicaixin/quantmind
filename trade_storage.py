@@ -385,6 +385,32 @@ def get_analysis_run(config: ToolkitConfig, user_id: int, analysis_id: str) -> d
     }
 
 
+def get_latest_analysis_run(config: ToolkitConfig, user_id: int, symbol: str) -> dict | None:
+    with closing(_connect(config)) as conn:
+        row = conn.execute(
+            """
+            SELECT id, symbol, form_json, result_json, created_at
+            FROM analysis_runs
+            WHERE user_id = ? AND symbol = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (user_id, symbol),
+        ).fetchone()
+    if not row:
+        return None
+    form_data = json.loads(row["form_json"])
+    result = json.loads(row["result_json"])
+    result["analysis_id"] = row["id"]
+    return {
+        "id": row["id"],
+        "symbol": row["symbol"],
+        "form": form_data,
+        "result": result,
+        "created_at": row["created_at"],
+    }
+
+
 def record_broker_order(config: ToolkitConfig, user_id: int, order_result: dict) -> int:
     """Record a broker order in the database. Returns the row id."""
     with closing(_connect(config)) as conn:
