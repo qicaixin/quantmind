@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -370,6 +372,98 @@ def _decision_marker_date(event: dict, bars: list[dict]) -> str | None:
     return str(bars[idx]["t"])[:10]
 
 
+_SCHEDULE_ALLOWED_TYPES = {"kronos", "trade_agent", "consensus"}
+_scheduler_started = False
+_scheduler_lock = threading.Lock()
+
+
+def _schedule_form_for_symbol(symbol: str) -> dict:
+    form = default_form_data()
+    form["symbol"] = symbol
+    form["label"] = symbol
+    form["label_auto"] = True
+    return form
+
+
+def _latest_kronos_action(config: ToolkitConfig, user_id: int, symbol: str) -> tuple[str, str | None]:
+    run = trade_storage.get_latest_analysis_run(config, user_id, symbol)
+    if run:
+        action = run["result"].get("prediction", {}).get("recommendation", {}).get("action", "HOLD")
+        return action, run["id"]
+    return "HOLD", None
+
+
+def _build_and_record_consensus_for_user(config: ToolkitConfig, user_id: int, symbol: str) -> dict | None:
+    ta_result = ta_service.get_latest(config, symbol, user_id=user_id)
+    if ta_result is None:
+        return None
+    kronos_action, analysis_id = _latest_kronos_action(config, user_id, symbol)
+    consensus = ta_service.build_consensus(kronos_action, ta_result["decision"] or "HOLD")
+    _record_consensus_decision(
+        config,
+        user_id,
+        symbol=symbol,
+        consensus=consensus,
+        kronos_action=kronos_action,
+        ta_result=ta_result,
+        analysis_id=analysis_id,
+    )
+    return {"kronos_action": kronos_action, "ta_decision": ta_result["decision"], "consensus": consensus}
+
+
+def _run_scheduled_analysis(config: ToolkitConfig, schedule: dict) -> dict:
+    user_id = int(schedule["user_id"])
+    symbols = schedule.get("symbols") or []
+    types = [item for item in (schedule.get("types") or []) if item in _SCHEDULE_ALLOWED_TYPES]
+    results: dict[str, dict] = {}
+    for symbol in symbols:
+        symbol_result: dict[str, object] = {}
+        if "kronos" in types:
+            form = _schedule_form_for_symbol(symbol)
+            analysis = execute_and_store_analysis(form, user_id=user_id)
+            symbol_result["kronos_analysis_id"] = analysis.get("analysis_id")
+        if "trade_agent" in types:
+            job_id = ta_service.submit_job(config, symbol, None, lang=schedule.get("lang") or "zh", user_id=user_id)
+            symbol_result["trade_agent_job_id"] = job_id
+        if "consensus" in types:
+            consensus = _build_and_record_consensus_for_user(config, user_id, symbol)
+            symbol_result["consensus"] = consensus or {"skipped": "No completed Trade-Agent analysis found"}
+        results[symbol] = symbol_result
+    return results
+
+
+def _scheduler_loop() -> None:
+    config = ToolkitConfig()
+    while True:
+        try:
+            due = trade_storage.list_due_analysis_schedules(config)
+            for schedule in due:
+                error = None
+                try:
+                    _run_scheduled_analysis(config, schedule)
+                except Exception as exc:
+                    error = str(exc)
+                trade_storage.mark_analysis_schedule_run(
+                    config,
+                    int(schedule["user_id"]),
+                    interval_minutes=int(schedule.get("interval_minutes") or 240),
+                    error=error,
+                )
+        except Exception as exc:
+            app.logger.exception("Analysis scheduler loop failed: %s", exc)
+        time.sleep(60)
+
+
+def start_analysis_scheduler() -> None:
+    global _scheduler_started
+    with _scheduler_lock:
+        if _scheduler_started:
+            return
+        _scheduler_started = True
+        thread = threading.Thread(target=_scheduler_loop, daemon=True, name="analysis-scheduler")
+        thread.start()
+
+
 def _best_execution_price(symbol: str, fallback_close: float) -> tuple[float, str]:
     """Return (price, source_label). Prefers real-time quote during market hours."""
     try:
@@ -719,6 +813,71 @@ def llm_config_api():
     merged.pop("api_key", None)  # never send key back to browser
     merged["has_api_key"] = bool(user_cfg.get("api_key", "").strip())
     return jsonify(merged)
+
+
+@app.route("/api/analysis-schedule", methods=["GET", "POST"])
+@login_required
+def analysis_schedule_api():
+    config = ToolkitConfig()
+    trade_storage.ensure_storage(config)
+    uid = _uid()
+    if request.method == "GET":
+        return jsonify(trade_storage.get_analysis_schedule(config, uid))
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        symbols = []
+        for raw in payload.get("symbols", []):
+            text = str(raw).strip()
+            if text:
+                symbols.append(normalize_symbol(text))
+        analysis_types = [
+            item for item in payload.get("types", [])
+            if str(item).strip() in _SCHEDULE_ALLOWED_TYPES
+        ]
+        interval_minutes = max(15, int(payload.get("interval_minutes", 240)))
+        lang = "zh" if payload.get("lang", "zh") == "zh" else "en"
+        enabled = bool(payload.get("enabled")) and bool(symbols) and bool(analysis_types)
+        saved = trade_storage.save_analysis_schedule(
+            config,
+            uid,
+            enabled=enabled,
+            symbols=symbols,
+            analysis_types=analysis_types,
+            interval_minutes=interval_minutes,
+            lang=lang,
+        )
+        return jsonify({"ok": True, "schedule": saved})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/analysis-schedule/run-now", methods=["POST"])
+@login_required
+def analysis_schedule_run_now_api():
+    config = ToolkitConfig()
+    trade_storage.ensure_storage(config)
+    uid = _uid()
+    schedule = trade_storage.get_analysis_schedule(config, uid)
+    if not schedule.get("symbols") or not schedule.get("types"):
+        return jsonify({"error": "Schedule has no symbols or analysis types configured"}), 400
+    try:
+        result = _run_scheduled_analysis(config, {**schedule, "user_id": uid})
+        trade_storage.mark_analysis_schedule_run(
+            config,
+            uid,
+            interval_minutes=int(schedule.get("interval_minutes") or 240),
+            error=None,
+        )
+        return jsonify({"ok": True, "result": result, "schedule": trade_storage.get_analysis_schedule(config, uid)})
+    except Exception as exc:
+        trade_storage.mark_analysis_schedule_run(
+            config,
+            uid,
+            interval_minutes=int(schedule.get("interval_minutes") or 240),
+            error=str(exc),
+        )
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route("/api/account", methods=["GET", "POST"])
@@ -1173,6 +1332,9 @@ def watchlist_remove(symbol: str):
     trade_storage.remove_watchlist_item(config, sym, user_id=_uid())
     items = trade_storage.get_watchlist(config, user_id=_uid())
     return jsonify({"items": items})
+
+
+start_analysis_scheduler()
 
 
 if __name__ == "__main__":

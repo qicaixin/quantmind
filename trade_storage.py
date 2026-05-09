@@ -4,7 +4,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -189,6 +189,20 @@ def ensure_storage(config: ToolkitConfig) -> None:
                 evaluated_at TEXT NOT NULL,
                 PRIMARY KEY (event_id, horizon_days),
                 FOREIGN KEY (event_id) REFERENCES decision_events(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS analysis_schedules (
+                user_id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                symbols_csv TEXT NOT NULL DEFAULT '',
+                types_json TEXT NOT NULL DEFAULT '[]',
+                interval_minutes INTEGER NOT NULL DEFAULT 240,
+                lang TEXT NOT NULL DEFAULT 'zh',
+                last_run TEXT,
+                next_run TEXT,
+                last_error TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
             );
             """
         )
@@ -686,6 +700,143 @@ def _decision_event_row_to_dict(row: sqlite3.Row | None) -> dict:
         "raw_payload": raw_payload,
         "dedupe_key": row["dedupe_key"],
         "created_at": row["created_at"],
+    }
+
+
+def get_analysis_schedule(config: ToolkitConfig, user_id: int) -> dict:
+    ensure_storage(config)
+    with closing(_connect(config)) as conn:
+        row = conn.execute(
+            "SELECT * FROM analysis_schedules WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    if not row:
+        return {
+            "enabled": False,
+            "symbols": [],
+            "types": ["kronos"],
+            "interval_minutes": 240,
+            "lang": "zh",
+            "last_run": None,
+            "next_run": None,
+            "last_error": None,
+        }
+    return _schedule_row_to_dict(row)
+
+
+def save_analysis_schedule(
+    config: ToolkitConfig,
+    user_id: int,
+    *,
+    enabled: bool,
+    symbols: list[str],
+    analysis_types: list[str],
+    interval_minutes: int,
+    lang: str = "zh",
+) -> dict:
+    ensure_storage(config)
+    now = datetime.now()
+    existing = get_analysis_schedule(config, user_id)
+    next_run = existing.get("next_run")
+    if enabled and not next_run:
+        next_run = now.isoformat(timespec="seconds")
+    if not enabled:
+        next_run = None
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            """
+            INSERT INTO analysis_schedules (
+                user_id, enabled, symbols_csv, types_json, interval_minutes,
+                lang, next_run, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                enabled = excluded.enabled,
+                symbols_csv = excluded.symbols_csv,
+                types_json = excluded.types_json,
+                interval_minutes = excluded.interval_minutes,
+                lang = excluded.lang,
+                next_run = excluded.next_run,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_id,
+                1 if enabled else 0,
+                ",".join(symbols),
+                json.dumps(analysis_types, ensure_ascii=False),
+                interval_minutes,
+                lang,
+                next_run,
+                now.isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+    return get_analysis_schedule(config, user_id)
+
+
+def list_due_analysis_schedules(config: ToolkitConfig, now: datetime | None = None) -> list[dict]:
+    ensure_storage(config)
+    now_text = (now or datetime.now()).isoformat(timespec="seconds")
+    with closing(_connect(config)) as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM analysis_schedules
+            WHERE enabled = 1
+              AND symbols_csv != ''
+              AND types_json != '[]'
+              AND (next_run IS NULL OR next_run <= ?)
+            ORDER BY COALESCE(next_run, updated_at)
+            """,
+            (now_text,),
+        ).fetchall()
+    return [_schedule_row_to_dict(row) for row in rows]
+
+
+def mark_analysis_schedule_run(
+    config: ToolkitConfig,
+    user_id: int,
+    *,
+    interval_minutes: int,
+    error: str | None = None,
+) -> None:
+    ensure_storage(config)
+    now = datetime.now()
+    next_run = now + timedelta(minutes=max(15, int(interval_minutes)))
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            """
+            UPDATE analysis_schedules
+            SET last_run = ?, next_run = ?, last_error = ?, updated_at = ?
+            WHERE user_id = ?
+            """,
+            (
+                now.isoformat(timespec="seconds"),
+                next_run.isoformat(timespec="seconds"),
+                error,
+                now.isoformat(timespec="seconds"),
+                user_id,
+            ),
+        )
+        conn.commit()
+
+
+def _schedule_row_to_dict(row: sqlite3.Row) -> dict:
+    try:
+        analysis_types = json.loads(row["types_json"] or "[]")
+    except Exception:
+        analysis_types = []
+    symbols = [item.strip() for item in (row["symbols_csv"] or "").split(",") if item.strip()]
+    return {
+        "user_id": row["user_id"],
+        "enabled": bool(row["enabled"]),
+        "symbols": symbols,
+        "types": analysis_types,
+        "interval_minutes": int(row["interval_minutes"]),
+        "lang": row["lang"],
+        "last_run": row["last_run"],
+        "next_run": row["next_run"],
+        "last_error": row["last_error"],
+        "updated_at": row["updated_at"],
     }
 
 
