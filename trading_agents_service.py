@@ -204,6 +204,62 @@ _DEFAULT_BACKENDS = {
 }
 
 
+def _patch_tradingagents_custom_openai_chat_completions() -> None:
+    """Force TradingAgents custom OpenAI-compatible URLs to use chat completions.
+
+    The upstream TradingAgents OpenAI client enables OpenAI's Responses API for
+    provider="openai". Custom gateways often expose only /chat/completions, so
+    route non-openai.com backends through ChatOpenAI with use_responses_api=False.
+    """
+    try:
+        import tradingagents.graph.trading_graph as trading_graph
+        from langchain_openai import ChatOpenAI
+        from tradingagents.llm_clients.base_client import normalize_content
+    except Exception:
+        return
+
+    if getattr(trading_graph, "_quantmind_chat_completions_patch", False):
+        return
+
+    original_create_llm_client = trading_graph.create_llm_client
+
+    class NormalizedChatCompletionsOpenAI(ChatOpenAI):
+        def invoke(self, input, config=None, **kwargs):
+            return normalize_content(super().invoke(input, config, **kwargs))
+
+    class CustomOpenAICompatibleClient:
+        def __init__(self, model: str, base_url: str, **kwargs):
+            self.model = model
+            self.base_url = base_url
+            self.kwargs = kwargs
+
+        def get_llm(self):
+            llm_kwargs = {
+                "model": self.model,
+                "base_url": self.base_url,
+                "use_responses_api": False,
+            }
+            api_key = self.kwargs.get("api_key") or os.environ.get("OPENAI_API_KEY")
+            if api_key:
+                llm_kwargs["api_key"] = api_key
+            for key in ("timeout", "max_retries", "callbacks", "http_client", "http_async_client"):
+                if key in self.kwargs:
+                    llm_kwargs[key] = self.kwargs[key]
+            return NormalizedChatCompletionsOpenAI(**llm_kwargs)
+
+    def create_llm_client(provider: str, model: str, base_url: str | None = None, **kwargs):
+        if (
+            provider.lower() == "openai"
+            and base_url
+            and "api.openai.com" not in base_url.lower()
+        ):
+            return CustomOpenAICompatibleClient(model, base_url, **kwargs)
+        return original_create_llm_client(provider, model, base_url, **kwargs)
+
+    trading_graph.create_llm_client = create_llm_client
+    trading_graph._quantmind_chat_completions_patch = True
+
+
 def _build_ta_config(llm_cfg: dict, *, lang: str = "en") -> dict:
     """Map Kronos llm_config.json settings to a TradingAgents config dict."""
     from tradingagents.default_config import DEFAULT_CONFIG
@@ -266,6 +322,7 @@ def _run_job(job_id: str, symbol: str, trade_date: str, config: ToolkitConfig, *
 
     try:
         from tradingagents.graph.trading_graph import TradingAgentsGraph
+        _patch_tradingagents_custom_openai_chat_completions()
     except ImportError as exc:
         update_ta_job(config, job_id, status="failed",
                       error="TradingAgents library is not installed. "
