@@ -843,13 +843,13 @@
                     <select id="schedule-cron-preset" onchange="onScheduleCronPresetChange(this.value)">
                         <option value="0 * * * *">每小时整点</option>
                         <option value="0 */4 * * *">每 4 小时</option>
-                        <option value="30 15 * * 1-5">每个交易日 15:30</option>
+                        <option value="30 14 * * 1-5">每个交易日 14:30</option>
                         <option value="0 9 * * 1-5">每个交易日 09:00</option>
                         <option value="custom">自定义 Cron</option>
                     </select>
                 </label>
                 <label>Cron 表达式（分钟 小时 日 月 星期）
-                    <input id="schedule-cron-expr" type="text" placeholder="例如：30 15 * * 1-5">
+                    <input id="schedule-cron-expr" type="text" placeholder="例如：30 14 * * 1-5">
                 </label>
                 <label>Trade-Agent 语言
                     <select id="schedule-lang">
