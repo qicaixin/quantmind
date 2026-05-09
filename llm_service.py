@@ -151,7 +151,8 @@ def call_llm(system_prompt: str, user_prompt: str, *, config_override: dict | No
 
 
 _T0_SYSTEM = """你是一位专业的 A 股量化交易员，擅长日内做 T（T+0 高抛低吸）。
-用户会提供某只股票的当日分钟级行情数据和技术指标，请给出简明的做T建议。
+用户会提供某只股票的分钟级行情数据和技术指标，请给出简明的做T建议。
+如果数据不是当日交易数据，需要明确提示只能作为最近交易日复盘参考。
 输出格式要求（Markdown）：
 1. **当前趋势**：（多/空/震荡，一句话说明理由）
 2. **做T建议**：（具体操作：低吸价位区间 / 高抛价位区间 / 暂不操作）
@@ -164,16 +165,17 @@ def analyze_t0(symbol: str, indicators: dict, *, llm_config: dict | None = None)
     ind = indicators
     user_prompt = f"""
 股票：{symbol}
-当前时间：{ind.get('last_time', '—')}
-当前价：{ind.get('last_price', '—')}　昨收：{ind.get('prev_close', '—')}
-今日开：{ind.get('open_price', '—')}　今日高：{ind.get('high', '—')}　今日低：{ind.get('low', '—')}
+数据日期：{ind.get('session_date', '—')}　是否当日数据：{'是' if ind.get('is_current_session') is not False else '否'}
+数据时间：{ind.get('last_time', '—')}
+当前价：{ind.get('last_price', '—')}　前收：{ind.get('prev_close', '—')}
+该日开：{ind.get('open_price', '—')}　该日高：{ind.get('high', '—')}　该日低：{ind.get('low', '—')}
 VWAP：{ind.get('vwap', '—')}　价格/VWAP偏差：{ind.get('vwap_dev_pct', '—')}%
 MA5：{ind.get('ma5', '—')}　MA10：{ind.get('ma10', '—')}　MA20：{ind.get('ma20', '—')}
 RSI(14)：{ind.get('rsi', '—')}
 MACD：{ind.get('macd', '—')}　Signal：{ind.get('macd_signal', '—')}　Histogram：{ind.get('macd_hist', '—')}
 布林上轨：{ind.get('bb_upper', '—')}　中轨：{ind.get('bb_mid', '—')}　下轨：{ind.get('bb_lower', '—')}
 成交量趋势（近5分钟 vs 前5分钟）：{ind.get('vol_trend', '—')}
-今日量比（当日量/5日均量）：{ind.get('vol_ratio', '—')}
+该日量比（该日量/5日均量）：{ind.get('vol_ratio', '—')}
 综合信号：{ind.get('signal', '—')}
 """
     return call_llm(_T0_SYSTEM, user_prompt.strip(), config_override=llm_config)

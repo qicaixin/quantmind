@@ -1966,6 +1966,8 @@
         const rsiColor = ind.rsi < 40 ? "down" : ind.rsi > 60 ? "up" : "";
         const macdColor = ind.macd_hist > 0 ? "up" : "down";
 
+        const dataTime = ind.last_time ? String(ind.last_time) : "—";
+        const dataStatus = ind.is_current_session === false ? "非当日" : "当日";
         document.getElementById("t0-indicators").innerHTML = `
             <div class="t0-card"><div class="t0-card-label">VWAP</div><div class="t0-card-value">${fmtInd(ind.vwap)}</div></div>
             <div class="t0-card"><div class="t0-card-label">价格偏VWAP</div><div class="t0-card-value ${devColor}">${vwapDev !== null ? (vwapDev > 0 ? "+" : "") + vwapDev + "%" : "—"}</div></div>
@@ -1976,7 +1978,7 @@
             <div class="t0-card"><div class="t0-card-label">MA5 / MA10</div><div class="t0-card-value">${fmtInd(ind.ma5)} / ${fmtInd(ind.ma10)}</div></div>
             <div class="t0-card"><div class="t0-card-label">量比</div><div class="t0-card-value">${fmtInd(ind.vol_ratio)}</div></div>
             <div class="t0-card"><div class="t0-card-label">量趋势</div><div class="t0-card-value">${fmtInd(ind.vol_trend)}</div></div>
-            <div class="t0-card"><div class="t0-card-label">更新时间</div><div class="t0-card-value" style="font-size:11px" id="t0-refresh-time">${new Date().toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit",second:"2-digit"})}</div></div>`;
+            <div class="t0-card"><div class="t0-card-label">数据时间</div><div class="t0-card-value" style="font-size:11px" id="t0-refresh-time">${dataTime} (${dataStatus})</div></div>`;
 
         const reasons = (ind.signal_reasons || []).join(" · ");
         document.getElementById("t0-reasons").textContent = reasons ? "信号依据：" + reasons : "";
