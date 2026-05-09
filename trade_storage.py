@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
@@ -119,6 +120,16 @@ def ensure_storage(config: ToolkitConfig) -> None:
                 error TEXT,
                 created_at TEXT NOT NULL,
                 completed_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS analysis_runs (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL DEFAULT 1,
+                symbol TEXT NOT NULL,
+                form_json TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
 
@@ -324,6 +335,54 @@ def save_user_broker_config(config: ToolkitConfig, user_id: int, broker_cfg: dic
             (json.dumps(broker_cfg, ensure_ascii=False), user_id),
         )
         conn.commit()
+
+
+def create_analysis_run(config: ToolkitConfig, user_id: int, form_data: dict, result: dict) -> dict:
+    analysis_id = uuid.uuid4().hex
+    stored_result = dict(result)
+    stored_result["analysis_id"] = analysis_id
+    symbol = stored_result.get("prediction", {}).get("summary", {}).get("symbol") or form_data.get("symbol", "")
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            """
+            INSERT INTO analysis_runs (id, user_id, symbol, form_json, result_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                analysis_id,
+                user_id,
+                symbol,
+                json.dumps(form_data, ensure_ascii=False),
+                json.dumps(stored_result, ensure_ascii=False),
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+    return stored_result
+
+
+def get_analysis_run(config: ToolkitConfig, user_id: int, analysis_id: str) -> dict | None:
+    with closing(_connect(config)) as conn:
+        row = conn.execute(
+            """
+            SELECT id, symbol, form_json, result_json, created_at
+            FROM analysis_runs
+            WHERE id = ? AND user_id = ?
+            """,
+            (analysis_id, user_id),
+        ).fetchone()
+    if not row:
+        return None
+    form_data = json.loads(row["form_json"])
+    result = json.loads(row["result_json"])
+    result["analysis_id"] = row["id"]
+    return {
+        "id": row["id"],
+        "symbol": row["symbol"],
+        "form": form_data,
+        "result": result,
+        "created_at": row["created_at"],
+    }
 
 
 def record_broker_order(config: ToolkitConfig, user_id: int, order_result: dict) -> int:

@@ -802,8 +802,6 @@
             </label>
             <div class="full-row">
                 <button type="submit" name="action" value="analyze" data-i18n="btn_analyze">Run Analysis</button>
-                <button type="submit" name="action" value="paper_trade" data-i18n="btn_paper">Run + Execute Paper Trade</button>
-                <button type="submit" name="action" value="live_export" data-i18n="btn_live">Run + Export Live Order</button>
                 <button type="button" class="broker-exec-btn" onclick="openManualOrderPanel()" style="font-size:12px;">🏦 手动下单</button>
             </div>
         </form>
@@ -838,6 +836,23 @@
                 </tr>
                 {% endfor %}
             </table>
+            {% if result.analysis_id %}
+            <div class="full-row" style="margin-top:12px;">
+                <form method="post" style="display:inline-block;margin-right:8px;">
+                    <input type="hidden" name="analysis_id" value="{{ result.analysis_id }}">
+                    <input type="hidden" name="action" value="paper_trade">
+                    <button type="submit" data-i18n="btn_paper_from_analysis">Execute Paper Trade from This Analysis</button>
+                </form>
+                <form method="post" style="display:inline-block;">
+                    <input type="hidden" name="analysis_id" value="{{ result.analysis_id }}">
+                    <input type="hidden" name="action" value="live_export">
+                    <button type="submit" data-i18n="btn_live_from_analysis">Export Live Order from This Analysis</button>
+                </form>
+                <div style="font-size:12px;color:#6b7280;margin-top:6px;" data-i18n="analysis_id_hint">
+                    These actions reuse the stored analysis result and do not rerun Kronos or QLib.
+                </div>
+            </div>
+            {% endif %}
         </div>
 
         <div class="panel">
@@ -1082,6 +1097,7 @@
 </div> <!-- /app-layout -->
 
 <script>
+    const CURRENT_ANALYSIS_ID = "{{ result.analysis_id if result and result.analysis_id else '' }}";
     const I18N = {
         en: {
             title: "Kronos + Qlib Stock Analyzer",
@@ -1105,6 +1121,9 @@
             btn_analyze: "Run Analysis",
             btn_paper: "Run + Execute Paper Trade",
             btn_live: "Run + Export Live Order",
+            btn_paper_from_analysis: "Execute Paper Trade from This Analysis",
+            btn_live_from_analysis: "Export Live Order from This Analysis",
+            analysis_id_hint: "These actions reuse the stored analysis result and do not rerun Kronos or QLib.",
             rec_action: "Recommended Action",
             forecast_summary: "Forecast Summary",
             backtest_summary: "Backtest Summary",
@@ -1182,6 +1201,9 @@
             btn_analyze: "运行分析",
             btn_paper: "运行 + 执行模拟交易",
             btn_live: "运行 + 导出实盘订单",
+            btn_paper_from_analysis: "基于本次分析执行模拟交易",
+            btn_live_from_analysis: "基于本次分析导出实盘订单",
+            analysis_id_hint: "这些操作会复用已保存的分析结果，不会重新运行 Kronos 或 QLib。",
             rec_action: "推荐操作",
             forecast_summary: "预测摘要",
             backtest_summary: "回测摘要",
@@ -1901,7 +1923,9 @@
     }
 
     function taLoadConsensus(symbol, taDecision) {
-        fetch("/api/consensus/" + symbol)
+        var url = "/api/consensus/" + symbol;
+        if (CURRENT_ANALYSIS_ID) url += "?analysis_id=" + encodeURIComponent(CURRENT_ANALYSIS_ID);
+        fetch(url)
         .then(r => r.json())
         .then(data => {
             if (data.error) return;
