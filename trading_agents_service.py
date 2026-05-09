@@ -111,9 +111,22 @@ def _check_llm_reachable(llm_cfg: dict) -> str | None:
                              proxies=proxies, verify=False, timeout=20)
         if resp.status_code in (200, 201):
             return None
-        data = resp.json() if resp.content else {}
-        err_msg = (data.get("error") or {}).get("message", resp.text[:200])
-        code = (data.get("error") or {}).get("code", "")
+        try:
+            data = resp.json() if resp.content else {}
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        error = data.get("error")
+        if isinstance(error, dict):
+            err_msg = str(error.get("message") or resp.text[:200])
+            code = str(error.get("code") or "")
+        elif isinstance(error, str):
+            err_msg = error
+            code = ""
+        else:
+            err_msg = resp.text[:200]
+            code = ""
         if resp.status_code == 429 or code == "insufficient_quota":
             return f"OpenAI quota exceeded — please check your billing at platform.openai.com."
         if resp.status_code == 401:
