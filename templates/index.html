@@ -400,7 +400,9 @@
         .schedule-checks label { margin: 0; }
         .schedule-status { font-size: 12px; color: #6b7280; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
         .schedule-clock-btn {
-            display: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
             width: auto;
             padding: 8px 11px;
             border-radius: 999px;
@@ -411,7 +413,6 @@
             line-height: 1;
             cursor: pointer;
         }
-        .schedule-clock-btn.visible { display: inline-flex; align-items: center; gap: 5px; }
         .schedule-clock-btn.paused { background: #f3f4f6; border-color: #d1d5db; color: #6b7280; }
         .t0-auto-label { font-size: 12px; color: #6b7280; display: flex; align-items: center; gap: 4px; }
 
@@ -2168,10 +2169,13 @@
     function renderScheduleClock(cfg) {
         document.querySelectorAll("[data-schedule-clock]").forEach(function(btn) {
             if (!scheduleIsConfigured(cfg)) {
-                btn.classList.remove("visible");
+                btn.dataset.scheduleConfigured = "0";
+                btn.classList.add("paused");
+                btn.innerHTML = "⏱ 设置";
+                btn.title = "Configure scheduled analysis trigger";
                 return;
             }
-            btn.classList.add("visible");
+            btn.dataset.scheduleConfigured = "1";
             btn.classList.toggle("paused", !cfg.enabled);
             btn.innerHTML = cfg.enabled ? "⏱ 暂停" : "⏸ 恢复";
             btn.title = cfg.enabled
@@ -2188,6 +2192,14 @@
     }
 
     function toggleScheduleTrigger() {
+        var configured = false;
+        document.querySelectorAll("[data-schedule-clock]").forEach(function(btn) {
+            if (btn.dataset.scheduleConfigured === "1") configured = true;
+        });
+        if (!configured) {
+            openSettings("schedule");
+            return;
+        }
         fetch("/api/analysis-schedule/toggle", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
