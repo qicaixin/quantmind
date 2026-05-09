@@ -2116,6 +2116,7 @@
                 if (displayName) displayName.textContent = "👤 " + accountResult.user.username;
             }
             if (results[3].schedule) renderScheduleStatus(results[3].schedule);
+            loadScheduleTriggerStatus();
             closeSettings();
             alert("✅ 设置已保存！");
         }).catch(err => {
@@ -2163,7 +2164,10 @@
     }
 
     function scheduleIsConfigured(cfg) {
-        return !!(cfg && (cfg.symbols || []).length && (cfg.types || []).length);
+        if (!cfg) return false;
+        const hasRunnableConfig = (cfg.symbols || []).length && (cfg.types || []).length;
+        const hasSavedSchedule = !!(cfg.updated_at || cfg.last_run || cfg.next_run);
+        return !!(cfg.enabled || hasRunnableConfig || hasSavedSchedule);
     }
 
     function renderScheduleClock(cfg) {
