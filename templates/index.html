@@ -297,6 +297,34 @@
         .kline-btn:hover { background: #e0e7ff; border-color: #a5b4fc; color: #4338ca; }
         .kline-btn.active { background: #4338ca; color: #fff; border-color: #4338ca; }
         #kline-chart { width: 100%; height: 420px; }
+        .decision-metrics {
+            display: none;
+            gap: 10px;
+            flex-wrap: wrap;
+            border-top: 1px solid #eef2ff;
+            margin-top: 10px;
+            padding-top: 12px;
+        }
+        .decision-metrics.visible { display: flex; }
+        .decision-metric-card {
+            min-width: 112px;
+            background: #f8fafc;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 9px 11px;
+        }
+        .decision-metric-label { font-size: 11px; color: #6b7280; margin-bottom: 3px; }
+        .decision-metric-value { font-size: 16px; font-weight: 800; color: #1f2937; }
+        .decision-metric-value.good { color: #dc2626; }
+        .decision-metric-value.bad { color: #16a34a; }
+        .decision-legend {
+            font-size: 12px;
+            color: #6b7280;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-left: auto;
+        }
 
         /* T+0 AI Analysis Panel */
         .t0-wrap {
@@ -698,6 +726,7 @@
             <button class="kline-btn" data-period="monthly" onclick="switchKlinePeriod('monthly',this)" data-i18n="kline_m">月K</button>
         </div>
         <div id="kline-chart"></div>
+        <div class="decision-metrics" id="decision-metrics"></div>
     </div>
 
     <!-- T+0 AI Analysis Panel -->
@@ -1690,15 +1719,23 @@
             klineChart.showLoading({ text: I18N[currentLang].kline_loading,
                 maskColor: "rgba(255,255,255,0.9)", textColor: "#374151", fontSize: 13 });
 
-            fetch(`/api/kline/${encodeURIComponent(symbolVal)}?period=${klinePeriod}`)
-                .then(r => r.json())
-                .then(data => {
+            const klineUrl = `/api/kline/${encodeURIComponent(symbolVal)}?period=${klinePeriod}`;
+            const statsUrl = `/api/decision-stats/${encodeURIComponent(symbolVal)}?horizon=5`;
+            Promise.all([
+                fetch(klineUrl).then(r => r.json()),
+                klinePeriod === "daily"
+                    ? fetch(statsUrl).then(r => r.json()).catch(() => null)
+                    : Promise.resolve(null)
+            ])
+                .then(([data, decisionData]) => {
                     if (data.error) throw new Error(data.error);
-                    renderKlineChart(data);
+                    renderKlineChart(data, decisionData);
+                    renderDecisionMetrics(decisionData);
                 })
                 .catch(err => {
                     console.error("Kline load error:", err);
                     klineChart.hideLoading();
+                    renderDecisionMetrics(null);
                     klineChart.setOption({
                         title: { text: I18N[currentLang].kline_error,
                             left: "center", top: "center",
@@ -1708,7 +1745,7 @@
         }, 60);
     }
 
-    function renderKlineChart(data) {
+    function renderKlineChart(data, decisionData) {
         if (!klineChart) return;
         const bars = data.bars;
         if (!bars || !bars.length) { klineChart.hideLoading(); return; }
@@ -1717,6 +1754,27 @@
         const ohlc      = bars.map(b => [b.o, b.c, b.l, b.h]);
         const vols      = bars.map(b => b.v);
         const volColors = bars.map(b => b.c >= b.o ? "#dc2626" : "#16a34a");
+        const decisionMarkers = ((decisionData && decisionData.markers) || [])
+            .filter(m => times.includes(m.date))
+            .map(m => {
+                const isBuy = (m.signal || "").toUpperCase() === "BUY";
+                const isSell = (m.signal || "").toUpperCase() === "SELL";
+                return {
+                    name: `${m.source}: ${m.signal}`,
+                    value: [m.date, m.price, m.source, m.signal],
+                    symbol: isBuy ? "triangle" : isSell ? "triangle" : "circle",
+                    symbolRotate: isSell ? 180 : 0,
+                    symbolSize: isBuy || isSell ? 16 : 10,
+                    itemStyle: { color: isBuy ? "#dc2626" : isSell ? "#16a34a" : "#6b7280" },
+                    label: {
+                        show: true,
+                        formatter: (m.source || "?").slice(0, 1).toUpperCase(),
+                        color: "#111827",
+                        fontSize: 10,
+                        position: isSell ? "bottom" : "top"
+                    }
+                };
+            });
 
         // Show last ~120 bars by default
         const startPct = Math.max(0, Math.round((1 - 120 / bars.length) * 100));
@@ -1734,15 +1792,19 @@
                     const k = params.find(p => p.seriesName === "K");
                     const vp = params.find(p => p.seriesName === "Vol");
                     if (!k) return "";
+                    const decisions = params.filter(p => p.seriesName === "Decision");
                     const [o, c, l, h] = k.value;
                     const chg = c - o, chgPct = o ? (chg / o * 100).toFixed(2) : "—";
                     const color = c >= o ? "#dc2626" : "#16a34a";
                     const fmtV = n => n >= 1e8 ? (n/1e8).toFixed(2)+"亿" : n >= 1e4 ? (n/1e4).toFixed(2)+"万" : String(n);
+                    const decisionHtml = decisions.length
+                        ? "<br>" + decisions.map(p => `信号 <b>${p.value[2]} ${p.value[3]}</b> @ ${p.value[1]}`).join("<br>")
+                        : "";
                     return `<div style="padding:4px 2px"><b style="color:#e5e7eb">${k.name}</b><br>
                         开 <b style="color:${color}">${o}</b> &nbsp; 收 <b style="color:${color}">${c}</b><br>
                         高 <b style="color:#dc2626">${h}</b> &nbsp; 低 <b style="color:#16a34a">${l}</b><br>
                         涨跌 <b style="color:${color}">${chg>=0?"+":""}${chg.toFixed(3)} (${chg>=0?"+":""}${chgPct}%)</b><br>
-                        量 ${vp ? fmtV(vp.value) : "—"}</div>`;
+                        量 ${vp ? fmtV(vp.value) : "—"}${decisionHtml}</div>`;
                 }
             },
             axisPointer: { link: [{ xAxisIndex: "all" }] },
@@ -1786,12 +1848,40 @@
                     name: "Vol", type: "bar", xAxisIndex: 1, yAxisIndex: 1,
                     data: vols.map((v, i) => ({ value: v, itemStyle: { color: volColors[i] } })),
                     barMaxWidth: 10
+                },
+                {
+                    name: "Decision", type: "scatter", xAxisIndex: 0, yAxisIndex: 0,
+                    data: decisionMarkers,
+                    z: 8,
+                    tooltip: { trigger: "item" }
                 }
             ]
         };
         klineChart.hideLoading();
         klineChart.setOption(option, true);
         klineChart.resize();
+    }
+
+    function renderDecisionMetrics(data) {
+        const panel = document.getElementById("decision-metrics");
+        if (!panel) return;
+        if (!data || data.error) {
+            panel.classList.remove("visible");
+            panel.innerHTML = "";
+            return;
+        }
+        const s = data.stats || {};
+        const fmtPct = v => v === null || v === undefined ? "—" : Number(v).toFixed(2) + "%";
+        const fmtNum = v => v === null || v === undefined ? "—" : Number(v).toFixed(2);
+        panel.classList.add("visible");
+        panel.innerHTML = `
+            <div class="decision-metric-card"><div class="decision-metric-label">T+${data.horizon_days} 样本</div><div class="decision-metric-value">${s.sample_size || 0}</div></div>
+            <div class="decision-metric-card"><div class="decision-metric-label">胜率</div><div class="decision-metric-value good">${fmtPct(s.win_rate_pct)}</div></div>
+            <div class="decision-metric-card"><div class="decision-metric-label">平均盈亏</div><div class="decision-metric-value ${(s.avg_return_pct || 0) >= 0 ? "good" : "bad"}">${fmtPct(s.avg_return_pct)}</div></div>
+            <div class="decision-metric-card"><div class="decision-metric-label">盈亏比</div><div class="decision-metric-value">${fmtNum(s.profit_factor)}</div></div>
+            <div class="decision-metric-card"><div class="decision-metric-label">最大回撤</div><div class="decision-metric-value bad">${fmtPct(s.max_drawdown_pct)}</div></div>
+            <div class="decision-legend"><span>▲ 买入</span><span>▼ 卖出</span><span>K=Kronos</span><span>T=Trade-Agent</span><span>C=Consensus</span></div>
+        `;
     }
 
     // Initial load — runs after all functions are defined
@@ -2238,6 +2328,9 @@
             brokerBtn.style.display = "block";
         } else {
             brokerBtn.style.display = "none";
+        }
+        if (klinePeriod === "daily" && data.symbol) {
+            loadKline(data.symbol);
         }
     }
 

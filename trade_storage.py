@@ -158,6 +158,38 @@ def ensure_storage(config: ToolkitConfig) -> None:
                 updated_at TEXT,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
+
+            CREATE TABLE IF NOT EXISTS decision_events (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL DEFAULT 1,
+                symbol TEXT NOT NULL,
+                source TEXT NOT NULL,
+                signal TEXT NOT NULL,
+                decision_time TEXT NOT NULL,
+                decision_price REAL,
+                confidence TEXT,
+                analysis_id TEXT,
+                ta_job_id TEXT,
+                rationale_json TEXT NOT NULL DEFAULT '[]',
+                raw_payload_json TEXT NOT NULL DEFAULT '{}',
+                dedupe_key TEXT UNIQUE,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS decision_evaluations (
+                event_id TEXT NOT NULL,
+                horizon_days INTEGER NOT NULL,
+                entry_price REAL NOT NULL,
+                exit_price REAL NOT NULL,
+                return_pct REAL NOT NULL,
+                max_drawdown_pct REAL NOT NULL,
+                max_runup_pct REAL NOT NULL,
+                is_win INTEGER NOT NULL,
+                evaluated_at TEXT NOT NULL,
+                PRIMARY KEY (event_id, horizon_days),
+                FOREIGN KEY (event_id) REFERENCES decision_events(id) ON DELETE CASCADE
+            );
             """
         )
         conn.commit()
@@ -473,6 +505,188 @@ def _migrate_schema(config: ToolkitConfig) -> None:
             except sqlite3.OperationalError:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
         conn.commit()
+
+
+def _canonical_signal(value: str | None) -> str:
+    signal = (value or "HOLD").upper().strip()
+    if signal in ("STRONG_BUY", "LEAN_BUY", "OVERWEIGHT"):
+        return "BUY"
+    if signal in ("STRONG_SELL", "LEAN_SELL", "UNDERWEIGHT"):
+        return "SELL"
+    if signal in ("BUY", "SELL", "HOLD"):
+        return signal
+    if "BUY" in signal or "买" in signal:
+        return "BUY"
+    if "SELL" in signal or "卖" in signal:
+        return "SELL"
+    return "HOLD"
+
+
+def record_decision_event(
+    config: ToolkitConfig,
+    *,
+    user_id: int,
+    symbol: str,
+    source: str,
+    signal: str,
+    decision_time: str | None = None,
+    decision_price: float | None = None,
+    confidence: str | None = None,
+    analysis_id: str | None = None,
+    ta_job_id: str | None = None,
+    rationale: list | dict | str | None = None,
+    raw_payload: dict | None = None,
+    dedupe_key: str | None = None,
+) -> dict:
+    ensure_storage(config)
+    event_id = uuid.uuid4().hex
+    created_at = datetime.now().isoformat(timespec="seconds")
+    event_time = decision_time or created_at
+    payload = raw_payload or {}
+    if rationale is None:
+        rationale_payload: list | dict | str = []
+    else:
+        rationale_payload = rationale
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO decision_events (
+                id, user_id, symbol, source, signal, decision_time, decision_price,
+                confidence, analysis_id, ta_job_id, rationale_json, raw_payload_json,
+                dedupe_key, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                user_id,
+                symbol,
+                source,
+                _canonical_signal(signal),
+                event_time,
+                float(decision_price) if decision_price is not None else None,
+                confidence,
+                analysis_id,
+                ta_job_id,
+                json.dumps(rationale_payload, ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=False),
+                dedupe_key,
+                created_at,
+            ),
+        )
+        if dedupe_key:
+            row = conn.execute(
+                "SELECT * FROM decision_events WHERE user_id = ? AND dedupe_key = ?",
+                (user_id, dedupe_key),
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT * FROM decision_events WHERE id = ?", (event_id,)).fetchone()
+        conn.commit()
+    return _decision_event_row_to_dict(row)
+
+
+def list_decision_events(
+    config: ToolkitConfig,
+    *,
+    user_id: int,
+    symbol: str | None = None,
+    source: str | None = None,
+    limit: int = 300,
+) -> list[dict]:
+    ensure_storage(config)
+    clauses = ["user_id = ?"]
+    params: list = [user_id]
+    if symbol:
+        clauses.append("symbol = ?")
+        params.append(symbol)
+    if source:
+        clauses.append("source = ?")
+        params.append(source)
+    params.append(limit)
+    with closing(_connect(config)) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM decision_events
+            WHERE {' AND '.join(clauses)}
+            ORDER BY decision_time DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    return [_decision_event_row_to_dict(row) for row in rows]
+
+
+def upsert_decision_evaluation(
+    config: ToolkitConfig,
+    *,
+    event_id: str,
+    horizon_days: int,
+    entry_price: float,
+    exit_price: float,
+    return_pct: float,
+    max_drawdown_pct: float,
+    max_runup_pct: float,
+    is_win: bool,
+) -> None:
+    ensure_storage(config)
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            """
+            INSERT INTO decision_evaluations (
+                event_id, horizon_days, entry_price, exit_price, return_pct,
+                max_drawdown_pct, max_runup_pct, is_win, evaluated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_id, horizon_days) DO UPDATE SET
+                entry_price = excluded.entry_price,
+                exit_price = excluded.exit_price,
+                return_pct = excluded.return_pct,
+                max_drawdown_pct = excluded.max_drawdown_pct,
+                max_runup_pct = excluded.max_runup_pct,
+                is_win = excluded.is_win,
+                evaluated_at = excluded.evaluated_at
+            """,
+            (
+                event_id,
+                horizon_days,
+                entry_price,
+                exit_price,
+                return_pct,
+                max_drawdown_pct,
+                max_runup_pct,
+                1 if is_win else 0,
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+
+
+def _decision_event_row_to_dict(row: sqlite3.Row | None) -> dict:
+    if row is None:
+        return {}
+    try:
+        rationale = json.loads(row["rationale_json"] or "[]")
+    except Exception:
+        rationale = []
+    try:
+        raw_payload = json.loads(row["raw_payload_json"] or "{}")
+    except Exception:
+        raw_payload = {}
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "symbol": row["symbol"],
+        "source": row["source"],
+        "signal": row["signal"],
+        "decision_time": row["decision_time"],
+        "decision_price": row["decision_price"],
+        "confidence": row["confidence"],
+        "analysis_id": row["analysis_id"],
+        "ta_job_id": row["ta_job_id"],
+        "rationale": rationale,
+        "raw_payload": raw_payload,
+        "dedupe_key": row["dedupe_key"],
+        "created_at": row["created_at"],
+    }
 
 
 def _state_path(config: ToolkitConfig, mode: str) -> Path:
@@ -833,7 +1047,32 @@ def update_ta_job(
                 job_id,
             ),
         )
+        job_row = conn.execute(
+            "SELECT job_id, user_id, symbol, trade_date, decision, reports_json, completed_at "
+            "FROM ta_analyses WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
         conn.commit()
+    if status == "done" and job_row and job_row["decision"]:
+        reports = {}
+        if job_row["reports_json"]:
+            try:
+                reports = json.loads(job_row["reports_json"])
+            except Exception:
+                reports = {}
+        record_decision_event(
+            config,
+            user_id=int(job_row["user_id"]),
+            symbol=job_row["symbol"],
+            source="trade_agent",
+            signal=job_row["decision"],
+            decision_time=job_row["completed_at"] or datetime.now().isoformat(timespec="seconds"),
+            confidence=None,
+            ta_job_id=job_row["job_id"],
+            rationale=reports.get("final_decision") or reports.get("trader_plan") or [],
+            raw_payload={"decision": job_row["decision"], "trade_date": job_row["trade_date"], "reports": reports},
+            dedupe_key=f"trade_agent:{job_row['job_id']}",
+        )
 
 
 def load_ta_job(config: ToolkitConfig, job_id: str) -> dict | None:

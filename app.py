@@ -198,7 +198,9 @@ def execute_and_store_analysis(form_data: dict, *, user_id: int = 1) -> dict:
     config = ToolkitConfig()
     trade_storage.ensure_storage(config)
     result = execute_analysis(form_data, user_id=user_id)
-    return trade_storage.create_analysis_run(config, user_id, form_data, result)
+    stored = trade_storage.create_analysis_run(config, user_id, form_data, result)
+    _record_kronos_decision(config, user_id, stored)
+    return stored
 
 
 def load_stored_analysis(analysis_id: str, *, user_id: int) -> tuple[dict, dict]:
@@ -216,6 +218,156 @@ def resolve_analysis_for_action(payload: dict, *, user_id: int) -> tuple[dict, d
         return load_stored_analysis(analysis_id, user_id=user_id)
     form_data = parse_form(payload)
     return form_data, execute_and_store_analysis(form_data, user_id=user_id)
+
+
+def _record_kronos_decision(config: ToolkitConfig, user_id: int, analysis_result: dict) -> None:
+    prediction = analysis_result.get("prediction", {})
+    summary = prediction.get("summary", {})
+    recommendation = prediction.get("recommendation", {})
+    symbol = summary.get("symbol")
+    action = recommendation.get("action", "HOLD")
+    if not symbol:
+        return
+    trade_storage.record_decision_event(
+        config,
+        user_id=user_id,
+        symbol=symbol,
+        source="kronos",
+        signal=action,
+        decision_price=recommendation.get("last_close") or summary.get("last_close"),
+        confidence=str(recommendation.get("predicted_return_pct", "")) if recommendation.get("predicted_return_pct") is not None else None,
+        analysis_id=analysis_result.get("analysis_id"),
+        rationale=recommendation.get("rationale", []),
+        raw_payload={"summary": summary, "recommendation": recommendation},
+        dedupe_key=f"kronos:{analysis_result.get('analysis_id')}",
+    )
+
+
+def _record_consensus_decision(
+    config: ToolkitConfig,
+    user_id: int,
+    *,
+    symbol: str,
+    consensus: dict,
+    kronos_action: str,
+    ta_result: dict,
+    analysis_id: str | None,
+) -> None:
+    signal = consensus.get("signal") or consensus.get("label") or "HOLD"
+    trade_storage.record_decision_event(
+        config,
+        user_id=user_id,
+        symbol=symbol,
+        source="consensus",
+        signal=signal,
+        decision_time=datetime.now().isoformat(timespec="seconds"),
+        confidence=consensus.get("confidence"),
+        analysis_id=analysis_id,
+        ta_job_id=ta_result.get("job_id"),
+        rationale=consensus.get("description", ""),
+        raw_payload={
+            "consensus": consensus,
+            "kronos_action": kronos_action,
+            "ta_decision": ta_result.get("decision"),
+        },
+        dedupe_key=f"consensus:{analysis_id or 'latest'}:{ta_result.get('job_id')}:{signal}",
+    )
+
+
+def _bar_index_on_or_after(bars: list[dict], date_text: str) -> int | None:
+    target = date_text[:10]
+    for idx, bar in enumerate(bars):
+        if str(bar.get("t", ""))[:10] >= target:
+            return idx
+    return None
+
+
+def _evaluate_event(event: dict, bars: list[dict], horizon_days: int) -> dict | None:
+    signal = (event.get("signal") or "HOLD").upper()
+    if signal not in ("BUY", "SELL"):
+        return None
+    entry_idx = _bar_index_on_or_after(bars, event.get("decision_time", ""))
+    if entry_idx is None:
+        return None
+    exit_idx = entry_idx + horizon_days
+    if exit_idx >= len(bars):
+        return None
+    entry_bar = bars[entry_idx]
+    exit_bar = bars[exit_idx]
+    entry_price = float(event.get("decision_price") or entry_bar["c"])
+    exit_price = float(exit_bar["c"])
+    window = bars[entry_idx: exit_idx + 1]
+    if signal == "BUY":
+        return_pct = (exit_price / entry_price - 1.0) * 100
+        max_drawdown = (min(float(b["l"]) for b in window) / entry_price - 1.0) * 100
+        max_runup = (max(float(b["h"]) for b in window) / entry_price - 1.0) * 100
+    else:
+        return_pct = (entry_price / exit_price - 1.0) * 100
+        max_drawdown = (entry_price / max(float(b["h"]) for b in window) - 1.0) * 100
+        max_runup = (entry_price / min(float(b["l"]) for b in window) - 1.0) * 100
+    return {
+        "event_id": event["id"],
+        "horizon_days": horizon_days,
+        "entry_date": entry_bar["t"],
+        "exit_date": exit_bar["t"],
+        "entry_price": round(entry_price, 4),
+        "exit_price": round(exit_price, 4),
+        "return_pct": round(return_pct, 4),
+        "max_drawdown_pct": round(max_drawdown, 4),
+        "max_runup_pct": round(max_runup, 4),
+        "is_win": return_pct > 0,
+    }
+
+
+def _summarize_evaluations(evaluations: list[dict]) -> dict:
+    if not evaluations:
+        return {
+            "sample_size": 0,
+            "win_rate_pct": None,
+            "avg_return_pct": None,
+            "profit_factor": None,
+            "max_drawdown_pct": None,
+            "avg_win_pct": None,
+            "avg_loss_pct": None,
+        }
+    returns = [float(item["return_pct"]) for item in evaluations]
+    wins = [value for value in returns if value > 0]
+    losses = [value for value in returns if value <= 0]
+    equity = 1.0
+    peak = 1.0
+    max_dd = 0.0
+    for value in returns:
+        equity *= 1.0 + value / 100.0
+        peak = max(peak, equity)
+        if peak:
+            max_dd = min(max_dd, (equity / peak - 1.0) * 100)
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    return {
+        "sample_size": len(evaluations),
+        "win_rate_pct": round(len(wins) / len(evaluations) * 100, 2),
+        "avg_return_pct": round(sum(returns) / len(returns), 4),
+        "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss > 0 else None,
+        "max_drawdown_pct": round(max_dd, 4),
+        "avg_win_pct": round(sum(wins) / len(wins), 4) if wins else None,
+        "avg_loss_pct": round(sum(losses) / len(losses), 4) if losses else None,
+    }
+
+
+def _decision_marker_price(event: dict, bars: list[dict]) -> float | None:
+    if event.get("decision_price") is not None:
+        return float(event["decision_price"])
+    idx = _bar_index_on_or_after(bars, event.get("decision_time", ""))
+    if idx is None:
+        return None
+    return float(bars[idx]["c"])
+
+
+def _decision_marker_date(event: dict, bars: list[dict]) -> str | None:
+    idx = _bar_index_on_or_after(bars, event.get("decision_time", ""))
+    if idx is None:
+        return None
+    return str(bars[idx]["t"])[:10]
 
 
 def _best_execution_price(symbol: str, fallback_close: float) -> tuple[float, str]:
@@ -470,6 +622,76 @@ def kline_api(symbol: str):
         if data is None:
             return jsonify({"error": "Data not available"}), 404
         return jsonify(data)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/decision-events/<symbol>")
+@login_required
+def decision_events_api(symbol: str):
+    try:
+        sym = normalize_symbol(symbol.strip())
+        source = request.args.get("source", "").strip() or None
+        limit = min(max(int(request.args.get("limit", 300)), 1), 1000)
+        config = ToolkitConfig()
+        events = trade_storage.list_decision_events(config, user_id=_uid(), symbol=sym, source=source, limit=limit)
+        return jsonify({"symbol": sym, "events": events})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/decision-stats/<symbol>")
+@login_required
+def decision_stats_api(symbol: str):
+    try:
+        sym = normalize_symbol(symbol.strip())
+        source = request.args.get("source", "").strip() or None
+        horizon_days = min(max(int(request.args.get("horizon", 5)), 1), 60)
+        days = min(max(int(request.args.get("days", 730)), 60), 3000)
+        config = ToolkitConfig()
+        bars_data = get_kline_data(sym, period="daily", days=days)
+        if bars_data is None or not bars_data.get("bars"):
+            return jsonify({"error": "K-line data unavailable"}), 404
+        bars = bars_data["bars"]
+        events = trade_storage.list_decision_events(config, user_id=_uid(), symbol=sym, source=source, limit=1000)
+        events = list(reversed(events))
+        evaluations = []
+        markers = []
+        for event in events:
+            marker_price = _decision_marker_price(event, bars)
+            marker_date = _decision_marker_date(event, bars)
+            if marker_price is not None and marker_date is not None:
+                markers.append({
+                    "id": event["id"],
+                    "date": marker_date,
+                    "price": round(marker_price, 4),
+                    "source": event["source"],
+                    "signal": event["signal"],
+                    "confidence": event.get("confidence"),
+                })
+            evaluation = _evaluate_event(event, bars, horizon_days)
+            if evaluation is None:
+                continue
+            evaluations.append({**event, "evaluation": evaluation})
+            trade_storage.upsert_decision_evaluation(
+                config,
+                event_id=event["id"],
+                horizon_days=horizon_days,
+                entry_price=evaluation["entry_price"],
+                exit_price=evaluation["exit_price"],
+                return_pct=evaluation["return_pct"],
+                max_drawdown_pct=evaluation["max_drawdown_pct"],
+                max_runup_pct=evaluation["max_runup_pct"],
+                is_win=evaluation["is_win"],
+            )
+        return jsonify({
+            "symbol": sym,
+            "horizon_days": horizon_days,
+            "source": source or "all",
+            "stats": _summarize_evaluations([item["evaluation"] for item in evaluations]),
+            "evaluations": evaluations[-200:],
+            "markers": markers[-300:],
+        })
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -887,6 +1109,15 @@ def consensus_api(symbol: str):
                 except Exception:
                     pass
         consensus = ta_service.build_consensus(kronos_action, ta_result["decision"] or "HOLD")
+        _record_consensus_decision(
+            config,
+            uid,
+            symbol=sym,
+            consensus=consensus,
+            kronos_action=kronos_action,
+            ta_result=ta_result,
+            analysis_id=analysis_id or None,
+        )
         return jsonify({
             "symbol":        sym,
             "kronos_action": kronos_action,
