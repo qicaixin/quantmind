@@ -2,14 +2,22 @@
 from __future__ import annotations
 
 import os
+import queue
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from config import ToolkitConfig
-from llm_service import load_llm_config, _get_proxy_url  # reuse proxy detection
+from llm_service import (
+    _get_proxy_url,
+    api_base_from_endpoint_url,
+    chat_completions_url,
+    endpoint_url_candidates,
+    load_llm_config,
+    resolve_llm_model,
+)
 
 if TYPE_CHECKING:
     pass
@@ -17,6 +25,7 @@ if TYPE_CHECKING:
 _lock = threading.Lock()
 # Cache TradingAgentsGraph instances keyed by (provider, model) so we reuse them
 _ta_instances: dict[str, object] = {}
+_TA_JOB_TIMEOUT_SECONDS = int(os.getenv("TA_JOB_TIMEOUT_SECONDS", str(20 * 60)))
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +72,7 @@ def _check_llm_reachable(llm_cfg: dict) -> str | None:
     provider = llm_cfg.get("provider", "Ollama").lower()
     base_url = llm_cfg.get("base_url", "").rstrip("/") or "https://api.openai.com"
     api_key  = llm_cfg.get("api_key", "").strip()
-    model    = llm_cfg.get("model", "")
+    model    = resolve_llm_model(llm_cfg)
 
     is_local = any(h in base_url for h in ("localhost", "127.0.0.1", "::1"))
 
@@ -91,31 +100,110 @@ def _check_llm_reachable(llm_cfg: dict) -> str | None:
     proxy_url = _get_proxy_url()
     proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else {}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    probe_url = f"{base_url}/v1/chat/completions"
+    if not model:
+        return "Could not auto-detect an LLM model. Please fill the model name in ⚙ Settings."
+
+    llm_cfg["model"] = model
     probe_body = {
-        "model": model or "gpt-4o-mini",
+        "model": model,
         "messages": [{"role": "user", "content": "hi"}],
         "max_tokens": 1,
     }
     try:
-        resp = requests.post(probe_url, json=probe_body, headers=headers,
-                             proxies=proxies, verify=False, timeout=20)
+        last_probe_url = chat_completions_url(base_url)
+        resp = None
+        for probe_url in endpoint_url_candidates(base_url, "chat/completions"):
+            last_probe_url = probe_url
+            resp = requests.post(probe_url, json=probe_body, headers=headers,
+                                 proxies=proxies, verify=False, timeout=20)
+            if resp.status_code != 404:
+                break
+        if resp is None:
+            return "LLM pre-flight failed: request was not sent."
         if resp.status_code in (200, 201):
-            return None
-        data = resp.json() if resp.content else {}
-        err_msg = (data.get("error") or {}).get("message", resp.text[:200])
-        code = (data.get("error") or {}).get("code", "")
-        if resp.status_code == 429 or code == "insufficient_quota":
-            return f"OpenAI quota exceeded — please check your billing at platform.openai.com."
-        if resp.status_code == 401:
-            return f"API key rejected (401). Please update it in ⚙ Settings."
-        return f"LLM API error {resp.status_code}: {err_msg}"
+            llm_cfg["base_url"] = api_base_from_endpoint_url(last_probe_url, "chat/completions")
+        else:
+            try:
+                data = resp.json() if resp.content else {}
+            except ValueError:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            error = data.get("error")
+            if isinstance(error, dict):
+                err_msg = str(error.get("message") or resp.text[:200])
+                code = str(error.get("code") or "")
+            elif isinstance(error, str):
+                err_msg = error
+                code = ""
+            else:
+                err_msg = resp.text[:200]
+                code = ""
+            if resp.status_code == 429 or code == "insufficient_quota":
+                return f"OpenAI quota exceeded — please check your billing at platform.openai.com."
+            if resp.status_code == 401:
+                return f"API key rejected (401). Please update it in ⚙ Settings."
+            return f"LLM API error {resp.status_code}: {err_msg}"
     except requests.exceptions.Timeout:
-        return f"LLM API timed out at {probe_url}. Check network/proxy."
+        return f"LLM API timed out at {last_probe_url}. Check network/proxy."
     except requests.exceptions.ConnectionError as e:
         return f"Cannot reach LLM API at {base_url}. Check URL in ⚙ Settings."
     except Exception as e:
         return f"LLM pre-flight failed: {e}"
+
+    tool_probe_body = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply with ok."}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "noop",
+                    "description": "No-op compatibility probe.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+        "tool_choice": "auto",
+        "max_tokens": 8,
+    }
+    try:
+        resp = requests.post(
+            last_probe_url,
+            json=tool_probe_body,
+            headers=headers,
+            proxies=proxies,
+            verify=False,
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            return None
+        try:
+            data = resp.json() if resp.content else {}
+        except ValueError:
+            data = {}
+        error = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error, dict):
+            err_msg = str(error.get("message") or resp.text[:200])
+        elif isinstance(error, str):
+            err_msg = error
+        else:
+            err_msg = resp.text[:200]
+        return f"LLM API chat works, but TradingAgents tool-call probe failed {resp.status_code}: {err_msg}"
+    except requests.exceptions.Timeout:
+        return (
+            "LLM API chat works, but TradingAgents tool-call probe did not respond "
+            f"within 30s at {last_probe_url}. This usually means the selected model "
+            "or backend supports plain chat but not OpenAI-compatible tool/function calling."
+        )
+    except requests.exceptions.ConnectionError:
+        return f"Cannot reach LLM API at {base_url} during TradingAgents tool-call probe."
+    except Exception as e:
+        return f"LLM tool-call pre-flight failed: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +260,100 @@ _DEFAULT_BACKENDS = {
 }
 
 
+def _patch_tradingagents_custom_openai_chat_completions() -> None:
+    """Force TradingAgents custom OpenAI-compatible URLs to use chat completions.
+
+    The upstream TradingAgents OpenAI client enables OpenAI's Responses API for
+    provider="openai". Custom gateways often expose only /chat/completions, so
+    route non-openai.com backends through ChatOpenAI with use_responses_api=False.
+    """
+    try:
+        import tradingagents.graph.trading_graph as trading_graph
+        from langchain_openai import ChatOpenAI
+        from tradingagents.llm_clients.base_client import normalize_content
+    except Exception:
+        return
+
+    if getattr(trading_graph, "_quantmind_chat_completions_patch", False):
+        return
+
+    original_create_llm_client = trading_graph.create_llm_client
+
+    class NormalizedChatCompletionsOpenAI(ChatOpenAI):
+        def invoke(self, input, config=None, **kwargs):
+            return normalize_content(super().invoke(input, config, **kwargs))
+
+    class CustomOpenAICompatibleClient:
+        def __init__(self, model: str, base_url: str, **kwargs):
+            self.model = model
+            self.base_url = base_url
+            self.kwargs = kwargs
+
+        def get_llm(self):
+            llm_kwargs = {
+                "model": self.model,
+                "base_url": self.base_url,
+                "use_responses_api": False,
+                "timeout": self.kwargs.get("timeout", 90),
+                "max_retries": self.kwargs.get("max_retries", 1),
+            }
+            api_key = self.kwargs.get("api_key") or os.environ.get("OPENAI_API_KEY")
+            if api_key:
+                llm_kwargs["api_key"] = api_key
+            for key in ("timeout", "max_retries", "callbacks", "http_client", "http_async_client"):
+                if key in self.kwargs:
+                    llm_kwargs[key] = self.kwargs[key]
+            return NormalizedChatCompletionsOpenAI(**llm_kwargs)
+
+    def create_llm_client(provider: str, model: str, base_url: str | None = None, **kwargs):
+        if (
+            provider.lower() == "openai"
+            and base_url
+            and "api.openai.com" not in base_url.lower()
+        ):
+            return CustomOpenAICompatibleClient(model, base_url, **kwargs)
+        return original_create_llm_client(provider, model, base_url, **kwargs)
+
+    trading_graph.create_llm_client = create_llm_client
+    trading_graph._quantmind_chat_completions_patch = True
+
+
+def _run_with_timeout(func, timeout_seconds: int):
+    result_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    def target():
+        try:
+            result_queue.put(("ok", func()))
+        except Exception as exc:
+            result_queue.put(("error", exc))
+
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    try:
+        status, payload = result_queue.get(timeout=timeout_seconds)
+    except queue.Empty as exc:
+        raise TimeoutError(
+            "TradingAgents analysis timed out. It is likely blocked in an external "
+            "data/LLM call; try again later or use a shorter analysis scope."
+        ) from exc
+    if status == "error":
+        raise payload
+    return payload
+
+
+def _is_stale_running_job(job: dict) -> bool:
+    if job.get("status") != "running":
+        return False
+    created_at = job.get("created_at")
+    if not created_at:
+        return False
+    try:
+        created = datetime.fromisoformat(str(created_at))
+    except ValueError:
+        return False
+    return datetime.now() - created > timedelta(seconds=_TA_JOB_TIMEOUT_SECONDS)
+
+
 def _build_ta_config(llm_cfg: dict, *, lang: str = "en") -> dict:
     """Map Kronos llm_config.json settings to a TradingAgents config dict."""
     from tradingagents.default_config import DEFAULT_CONFIG
@@ -181,9 +363,11 @@ def _build_ta_config(llm_cfg: dict, *, lang: str = "en") -> dict:
 
     provider_raw = llm_cfg.get("provider", "Ollama").lower()
     ta_provider  = _PROVIDER_MAP.get(provider_raw, "openai")
-    model        = llm_cfg.get("model", "qwen2.5:7b")
+    model        = str(llm_cfg.get("model") or "").strip()
     base_url     = llm_cfg.get("base_url", "").rstrip("/")
     api_key      = llm_cfg.get("api_key", "").strip()
+    if not model:
+        model = resolve_llm_model(llm_cfg) or ("qwen2.5:7b" if ta_provider == "ollama" else "gpt-4o-mini")
 
     cfg["llm_provider"]    = ta_provider
     cfg["deep_think_llm"]  = model
@@ -232,6 +416,7 @@ def _run_job(job_id: str, symbol: str, trade_date: str, config: ToolkitConfig, *
 
     try:
         from tradingagents.graph.trading_graph import TradingAgentsGraph
+        _patch_tradingagents_custom_openai_chat_completions()
     except ImportError as exc:
         update_ta_job(config, job_id, status="failed",
                       error="TradingAgents library is not installed. "
@@ -247,7 +432,7 @@ def _run_job(job_id: str, symbol: str, trade_date: str, config: ToolkitConfig, *
         from trade_storage import get_user_llm_config
         user_llm = get_user_llm_config(config, user_id)
         for k, v in user_llm.items():
-            if v not in (None, ""):
+            if k == "model" or v not in (None, ""):
                 llm_cfg[k] = v
 
         # Pre-flight: verify LLM is reachable before spinning up the whole graph
@@ -268,7 +453,16 @@ def _run_job(job_id: str, symbol: str, trade_date: str, config: ToolkitConfig, *
         # Restore proxy env vars so yfinance can reach Yahoo Finance
         # (akshare clears HTTP_PROXY/HTTPS_PROXY on import)
         with _proxy_env():
-            final_state, decision = ta.propagate(ticker, trade_date)
+            try:
+                final_state, decision = _run_with_timeout(
+                    lambda: ta.propagate(ticker, trade_date),
+                    _TA_JOB_TIMEOUT_SECONDS,
+                )
+            except TimeoutError as exc:
+                with _lock:
+                    _ta_instances.pop(key, None)
+                update_ta_job(config, job_id, status="failed", error=str(exc))
+                return
 
         reports = {
             "market_report":        final_state.get("market_report", ""),
@@ -316,8 +510,20 @@ def submit_job(config: ToolkitConfig, symbol: str, trade_date: str | None = None
 
 def get_job(config: ToolkitConfig, job_id: str) -> dict | None:
     """Load a TA job's status and result from SQLite."""
-    from trade_storage import load_ta_job
-    return load_ta_job(config, job_id)
+    from trade_storage import load_ta_job, update_ta_job
+    job = load_ta_job(config, job_id)
+    if job and _is_stale_running_job(job):
+        update_ta_job(
+            config,
+            job_id,
+            status="failed",
+            error=(
+                "TradingAgents analysis timed out. It likely got stuck in an "
+                "external data/LLM call."
+            ),
+        )
+        return load_ta_job(config, job_id)
+    return job
 
 
 def get_latest(config: ToolkitConfig, symbol: str, *, user_id: int = 1) -> dict | None:

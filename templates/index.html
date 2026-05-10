@@ -297,6 +297,34 @@
         .kline-btn:hover { background: #e0e7ff; border-color: #a5b4fc; color: #4338ca; }
         .kline-btn.active { background: #4338ca; color: #fff; border-color: #4338ca; }
         #kline-chart { width: 100%; height: 420px; }
+        .decision-metrics {
+            display: none;
+            gap: 10px;
+            flex-wrap: wrap;
+            border-top: 1px solid #eef2ff;
+            margin-top: 10px;
+            padding-top: 12px;
+        }
+        .decision-metrics.visible { display: flex; }
+        .decision-metric-card {
+            min-width: 112px;
+            background: #f8fafc;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 9px 11px;
+        }
+        .decision-metric-label { font-size: 11px; color: #6b7280; margin-bottom: 3px; }
+        .decision-metric-value { font-size: 16px; font-weight: 800; color: #1f2937; }
+        .decision-metric-value.good { color: #dc2626; }
+        .decision-metric-value.bad { color: #16a34a; }
+        .decision-legend {
+            font-size: 12px;
+            color: #6b7280;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-left: auto;
+        }
 
         /* T+0 AI Analysis Panel */
         .t0-wrap {
@@ -368,6 +396,24 @@
         .settings-tab.active { color: #4338ca; background: #fff; border-bottom: 2px solid #4338ca; margin-bottom: -2px; }
         .settings-tab-content { display: none; }
         .settings-tab-content.active { display: block; }
+        .schedule-checks { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 12px; }
+        .schedule-checks label { margin: 0; }
+        .schedule-status { font-size: 12px; color: #6b7280; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
+        .schedule-clock-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            width: auto;
+            padding: 8px 11px;
+            border-radius: 999px;
+            border: 1px solid #c7d2fe;
+            background: #eef2ff;
+            color: #3730a3;
+            font-size: 14px;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .schedule-clock-btn.paused { background: #f3f4f6; border-color: #d1d5db; color: #6b7280; }
         .t0-auto-label { font-size: 12px; color: #6b7280; display: flex; align-items: center; gap: 4px; }
 
         /* Broker order button */
@@ -698,6 +744,7 @@
             <button class="kline-btn" data-period="monthly" onclick="switchKlinePeriod('monthly',this)" data-i18n="kline_m">月K</button>
         </div>
         <div id="kline-chart"></div>
+        <div class="decision-metrics" id="decision-metrics"></div>
     </div>
 
     <!-- T+0 AI Analysis Panel -->
@@ -726,6 +773,7 @@
             <div class="settings-tabs">
                 <button class="settings-tab active" data-settings-tab="llm" onclick="switchSettingsTab('llm')">🤖 AI / LLM</button>
                 <button class="settings-tab" data-settings-tab="broker" onclick="switchSettingsTab('broker')">🏦 券商交易</button>
+                <button class="settings-tab" data-settings-tab="schedule" onclick="switchSettingsTab('schedule')">⏱ Scheduler</button>
                 <button class="settings-tab" data-settings-tab="account" onclick="switchSettingsTab('account')">👤 Account</button>
             </div>
 
@@ -752,8 +800,8 @@
                 <label><span data-i18n="settings_api_key">API Key（本地 Ollama 无需填写）</span>
                     <input id="cfg-api-key" type="password" placeholder="外部 API 才需要填写">
                 </label>
-                <label><span data-i18n="settings_model">模型</span>
-                    <input id="cfg-model" type="text" placeholder="qwen2.5:7b">
+                <label><span data-i18n="settings_model">模型（留空自动识别）</span>
+                    <input id="cfg-model" type="text" placeholder="留空自动识别">
                 </label>
             </div>
 
@@ -790,6 +838,51 @@
                         下单前需要确认
                     </span>
                 </label>
+            </div>
+
+            <!-- Scheduler Tab -->
+            <div class="settings-tab-content" id="tab-schedule">
+                <div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:6px;padding:8px 10px;font-size:12px;color:#3730a3;margin:0 0 10px;">
+                    自动触发只会运行分析并记录决策时间线，不会执行纸面/实盘下单。
+                </div>
+                <label>
+                    <span style="display:flex;align-items:center;gap:6px;">
+                        <input type="checkbox" id="schedule-enabled" style="width:auto;margin:0;">
+                        启用自动分析
+                    </span>
+                </label>
+                <label>股票列表（逗号分隔）
+                    <input id="schedule-symbols" type="text" placeholder="例如：600938, 601169">
+                </label>
+                <label>Cron 触发器
+                    <select id="schedule-cron-preset" onchange="onScheduleCronPresetChange(this.value)">
+                        <option value="0 * * * *">每小时整点</option>
+                        <option value="0 */4 * * *">每 4 小时</option>
+                        <option value="30 14 * * 1-5">每个交易日 14:30</option>
+                        <option value="0 9 * * 1-5">每个交易日 09:00</option>
+                        <option value="custom">自定义 Cron</option>
+                    </select>
+                </label>
+                <label>Cron 表达式（分钟 小时 日 月 星期）
+                    <input id="schedule-cron-expr" type="text" placeholder="例如：30 14 * * 1-5">
+                </label>
+                <label>Trade-Agent 语言
+                    <select id="schedule-lang">
+                        <option value="zh">中文</option>
+                        <option value="en">English</option>
+                    </select>
+                </label>
+                <div class="schedule-checks">
+                    <label><span style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="schedule-type-kronos" style="width:auto;margin:0;"> Kronos Run Analysis</span></label>
+                    <label><span style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="schedule-type-ta" style="width:auto;margin:0;"> Trade-Agent AI Analysis</span></label>
+                    <label><span style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="schedule-type-consensus" style="width:auto;margin:0;"> Consensus 记录</span></label>
+                    <label><span style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="schedule-paper-trade" style="width:auto;margin:0;"> 执行纸面交易（Paper Trade）</span></label>
+                </div>
+                <div style="font-size:12px;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:7px 9px;margin-bottom:10px;">
+                    纸面交易会按 Kronos 的 BUY/SELL/HOLD 建议更新虚拟组合；建议同时勾选 Kronos Run Analysis，避免使用旧分析结果。
+                </div>
+                <button class="t0-btn t0-btn-secondary" type="button" onclick="runScheduleNow()">Run Now</button>
+                <div class="schedule-status" id="schedule-status">尚未加载调度状态。</div>
             </div>
 
             <!-- Account Tab -->
@@ -880,6 +973,7 @@
             </label>
             <div class="full-row">
                 <button type="submit" name="action" value="analyze" data-i18n="btn_analyze">Run Analysis</button>
+                <button type="button" class="schedule-clock-btn" data-schedule-clock onclick="toggleScheduleTrigger()" title="Pause/resume scheduled analysis">⏱</button>
                 <button type="button" class="broker-exec-btn" onclick="openManualOrderPanel()" style="font-size:12px;">🏦 手动下单</button>
             </div>
         </form>
@@ -1231,6 +1325,7 @@
             <button class="ta-latest-btn" onclick="loadTaLatest()">
                 ↺ Load Latest
             </button>
+            <button type="button" class="schedule-clock-btn" data-schedule-clock onclick="toggleScheduleTrigger()" title="Pause/resume scheduled analysis">⏱</button>
         </div>
     </div>
 
@@ -1393,7 +1488,7 @@
             t0_auto: "Auto-refresh every minute",
             settings_title: "⚙ LLM API Settings", settings_provider: "Provider",
             settings_base_url: "API Base URL", settings_api_key: "API Key",
-            settings_model: "Model", settings_cancel: "Cancel", settings_save: "Save",
+            settings_model: "Model (blank = auto-detect)", settings_cancel: "Cancel", settings_save: "Save",
             watchlist_title: "Watchlist",
             watchlist_add: "+ Add",
             watchlist_placeholder: "Stock code",
@@ -1498,7 +1593,7 @@
             t0_auto: "每分钟自动刷新",
             settings_title: "⚙ LLM API 设置", settings_provider: "服务商",
             settings_base_url: "API Base URL", settings_api_key: "API Key",
-            settings_model: "模型", settings_cancel: "取消", settings_save: "保存",
+            settings_model: "模型（留空自动识别）", settings_cancel: "取消", settings_save: "保存",
             watchlist_title: "自选股",
             watchlist_add: "+ 添加",
             watchlist_placeholder: "输入股票代码",
@@ -1690,15 +1785,23 @@
             klineChart.showLoading({ text: I18N[currentLang].kline_loading,
                 maskColor: "rgba(255,255,255,0.9)", textColor: "#374151", fontSize: 13 });
 
-            fetch(`/api/kline/${encodeURIComponent(symbolVal)}?period=${klinePeriod}`)
-                .then(r => r.json())
-                .then(data => {
+            const klineUrl = `/api/kline/${encodeURIComponent(symbolVal)}?period=${klinePeriod}`;
+            const statsUrl = `/api/decision-stats/${encodeURIComponent(symbolVal)}?horizon=5`;
+            Promise.all([
+                fetch(klineUrl).then(r => r.json()),
+                klinePeriod === "daily"
+                    ? fetch(statsUrl).then(r => r.json()).catch(() => null)
+                    : Promise.resolve(null)
+            ])
+                .then(([data, decisionData]) => {
                     if (data.error) throw new Error(data.error);
-                    renderKlineChart(data);
+                    renderKlineChart(data, decisionData);
+                    renderDecisionMetrics(decisionData);
                 })
                 .catch(err => {
                     console.error("Kline load error:", err);
                     klineChart.hideLoading();
+                    renderDecisionMetrics(null);
                     klineChart.setOption({
                         title: { text: I18N[currentLang].kline_error,
                             left: "center", top: "center",
@@ -1708,7 +1811,7 @@
         }, 60);
     }
 
-    function renderKlineChart(data) {
+    function renderKlineChart(data, decisionData) {
         if (!klineChart) return;
         const bars = data.bars;
         if (!bars || !bars.length) { klineChart.hideLoading(); return; }
@@ -1717,6 +1820,27 @@
         const ohlc      = bars.map(b => [b.o, b.c, b.l, b.h]);
         const vols      = bars.map(b => b.v);
         const volColors = bars.map(b => b.c >= b.o ? "#dc2626" : "#16a34a");
+        const decisionMarkers = ((decisionData && decisionData.markers) || [])
+            .filter(m => times.includes(m.date))
+            .map(m => {
+                const isBuy = (m.signal || "").toUpperCase() === "BUY";
+                const isSell = (m.signal || "").toUpperCase() === "SELL";
+                return {
+                    name: `${m.source}: ${m.signal}`,
+                    value: [m.date, m.price, m.source, m.signal],
+                    symbol: isBuy ? "triangle" : isSell ? "triangle" : "circle",
+                    symbolRotate: isSell ? 180 : 0,
+                    symbolSize: isBuy || isSell ? 16 : 10,
+                    itemStyle: { color: isBuy ? "#dc2626" : isSell ? "#16a34a" : "#6b7280" },
+                    label: {
+                        show: true,
+                        formatter: (m.source || "?").slice(0, 1).toUpperCase(),
+                        color: "#111827",
+                        fontSize: 10,
+                        position: isSell ? "bottom" : "top"
+                    }
+                };
+            });
 
         // Show last ~120 bars by default
         const startPct = Math.max(0, Math.round((1 - 120 / bars.length) * 100));
@@ -1734,15 +1858,19 @@
                     const k = params.find(p => p.seriesName === "K");
                     const vp = params.find(p => p.seriesName === "Vol");
                     if (!k) return "";
+                    const decisions = params.filter(p => p.seriesName === "Decision");
                     const [o, c, l, h] = k.value;
                     const chg = c - o, chgPct = o ? (chg / o * 100).toFixed(2) : "—";
                     const color = c >= o ? "#dc2626" : "#16a34a";
                     const fmtV = n => n >= 1e8 ? (n/1e8).toFixed(2)+"亿" : n >= 1e4 ? (n/1e4).toFixed(2)+"万" : String(n);
+                    const decisionHtml = decisions.length
+                        ? "<br>" + decisions.map(p => `信号 <b>${p.value[2]} ${p.value[3]}</b> @ ${p.value[1]}`).join("<br>")
+                        : "";
                     return `<div style="padding:4px 2px"><b style="color:#e5e7eb">${k.name}</b><br>
                         开 <b style="color:${color}">${o}</b> &nbsp; 收 <b style="color:${color}">${c}</b><br>
                         高 <b style="color:#dc2626">${h}</b> &nbsp; 低 <b style="color:#16a34a">${l}</b><br>
                         涨跌 <b style="color:${color}">${chg>=0?"+":""}${chg.toFixed(3)} (${chg>=0?"+":""}${chgPct}%)</b><br>
-                        量 ${vp ? fmtV(vp.value) : "—"}</div>`;
+                        量 ${vp ? fmtV(vp.value) : "—"}${decisionHtml}</div>`;
                 }
             },
             axisPointer: { link: [{ xAxisIndex: "all" }] },
@@ -1786,12 +1914,40 @@
                     name: "Vol", type: "bar", xAxisIndex: 1, yAxisIndex: 1,
                     data: vols.map((v, i) => ({ value: v, itemStyle: { color: volColors[i] } })),
                     barMaxWidth: 10
+                },
+                {
+                    name: "Decision", type: "scatter", xAxisIndex: 0, yAxisIndex: 0,
+                    data: decisionMarkers,
+                    z: 8,
+                    tooltip: { trigger: "item" }
                 }
             ]
         };
         klineChart.hideLoading();
         klineChart.setOption(option, true);
         klineChart.resize();
+    }
+
+    function renderDecisionMetrics(data) {
+        const panel = document.getElementById("decision-metrics");
+        if (!panel) return;
+        if (!data || data.error) {
+            panel.classList.remove("visible");
+            panel.innerHTML = "";
+            return;
+        }
+        const s = data.stats || {};
+        const fmtPct = v => v === null || v === undefined ? "—" : Number(v).toFixed(2) + "%";
+        const fmtNum = v => v === null || v === undefined ? "—" : Number(v).toFixed(2);
+        panel.classList.add("visible");
+        panel.innerHTML = `
+            <div class="decision-metric-card"><div class="decision-metric-label">T+${data.horizon_days} 样本</div><div class="decision-metric-value">${s.sample_size || 0}</div></div>
+            <div class="decision-metric-card"><div class="decision-metric-label">胜率</div><div class="decision-metric-value good">${fmtPct(s.win_rate_pct)}</div></div>
+            <div class="decision-metric-card"><div class="decision-metric-label">平均盈亏</div><div class="decision-metric-value ${(s.avg_return_pct || 0) >= 0 ? "good" : "bad"}">${fmtPct(s.avg_return_pct)}</div></div>
+            <div class="decision-metric-card"><div class="decision-metric-label">盈亏比</div><div class="decision-metric-value">${fmtNum(s.profit_factor)}</div></div>
+            <div class="decision-metric-card"><div class="decision-metric-label">最大回撤</div><div class="decision-metric-value bad">${fmtPct(s.max_drawdown_pct)}</div></div>
+            <div class="decision-legend"><span>▲ 买入</span><span>▼ 卖出</span><span>K=Kronos</span><span>T=Trade-Agent</span><span>C=Consensus</span></div>
+        `;
     }
 
     // Initial load — runs after all functions are defined
@@ -1857,6 +2013,18 @@
             document.getElementById("account-new-password").value = "";
             document.getElementById("account-confirm-password").value = "";
         });
+        fetch("/api/analysis-schedule").then(r => r.json()).then(cfg => {
+            document.getElementById("schedule-enabled").checked = !!cfg.enabled;
+            document.getElementById("schedule-symbols").value = (cfg.symbols || []).join(", ");
+            setScheduleCronFields(cfg.cron_expr || "0 */4 * * *");
+            document.getElementById("schedule-lang").value = cfg.lang || "zh";
+            const types = cfg.types || [];
+            document.getElementById("schedule-type-kronos").checked = types.includes("kronos");
+            document.getElementById("schedule-type-ta").checked = types.includes("trade_agent");
+            document.getElementById("schedule-type-consensus").checked = types.includes("consensus");
+            document.getElementById("schedule-paper-trade").checked = !!cfg.paper_trade_enabled;
+            renderScheduleStatus(cfg);
+        });
         switchSettingsTab(tab || "llm");
         document.getElementById("settings-modal").classList.add("open");
     }
@@ -1871,6 +2039,7 @@
         });
         document.getElementById("tab-llm").classList.toggle("active", tab === "llm");
         document.getElementById("tab-broker").classList.toggle("active", tab === "broker");
+        document.getElementById("tab-schedule").classList.toggle("active", tab === "schedule");
         document.getElementById("tab-account").classList.toggle("active", tab === "account");
     }
 
@@ -1914,6 +2083,20 @@
             accountCfg.new_password = newPassword;
         }
 
+        const scheduleTypes = [];
+        if (document.getElementById("schedule-type-kronos").checked) scheduleTypes.push("kronos");
+        if (document.getElementById("schedule-type-ta").checked) scheduleTypes.push("trade_agent");
+        if (document.getElementById("schedule-type-consensus").checked) scheduleTypes.push("consensus");
+        const scheduleCfg = {
+            enabled: document.getElementById("schedule-enabled").checked,
+            symbols: document.getElementById("schedule-symbols").value.split(",").map(s => s.trim()).filter(Boolean),
+            interval_minutes: 240,
+            cron_expr: document.getElementById("schedule-cron-expr").value.trim(),
+            lang: document.getElementById("schedule-lang").value || "zh",
+            types: scheduleTypes,
+            paper_trade_enabled: document.getElementById("schedule-paper-trade").checked,
+        };
+
         const parseSaveResponse = function(response) {
             return response.json().then(data => {
                 if (!response.ok || data.error) throw new Error(data.error || "Save failed");
@@ -1925,17 +2108,129 @@
             fetch("/api/llm-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(llmCfg) }).then(parseSaveResponse),
             fetch("/api/broker-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(brokerCfg) }).then(parseSaveResponse),
             fetch("/api/account", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(accountCfg) }).then(parseSaveResponse),
+            fetch("/api/analysis-schedule", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(scheduleCfg) }).then(parseSaveResponse),
         ]).then(results => {
             const accountResult = results[2];
             if (accountResult.user && accountResult.user.username) {
                 const displayName = document.getElementById("user-display-name");
                 if (displayName) displayName.textContent = "👤 " + accountResult.user.username;
             }
+            if (results[3].schedule) renderScheduleStatus(results[3].schedule);
+            loadScheduleTriggerStatus();
             closeSettings();
             alert("✅ 设置已保存！");
         }).catch(err => {
             alert("❌ " + err.message);
         });
+    }
+
+    function renderScheduleStatus(cfg) {
+        const el = document.getElementById("schedule-status");
+        const types = (cfg.types || []).join(", ") || "—";
+        const symbols = (cfg.symbols || []).join(", ") || "—";
+        if (el) {
+            el.innerHTML = "状态：" + (cfg.enabled ? "已启用" : "已暂停")
+                + "<br>股票：" + escHtml(symbols)
+                + "<br>类型：" + escHtml(types)
+                + "<br>Cron：" + escHtml(cfg.cron_expr || "—")
+                + "<br>纸面交易：" + (cfg.paper_trade_enabled ? "启用" : "未启用")
+                + "<br>上次运行：" + escHtml(cfg.last_run || "—")
+                + "<br>下次运行：" + escHtml(cfg.next_run || "—")
+                + (cfg.last_error ? "<br><span style='color:#b91c1c'>上次错误：" + escHtml(cfg.last_error) + "</span>" : "");
+        }
+        renderScheduleClock(cfg);
+    }
+
+    function setScheduleCronFields(expr) {
+        const preset = document.getElementById("schedule-cron-preset");
+        const input = document.getElementById("schedule-cron-expr");
+        if (!preset || !input) return;
+        const found = Array.from(preset.options).some(opt => opt.value === expr);
+        preset.value = found ? expr : "custom";
+        input.value = expr;
+        input.disabled = preset.value !== "custom";
+    }
+
+    function onScheduleCronPresetChange(value) {
+        const input = document.getElementById("schedule-cron-expr");
+        if (!input) return;
+        if (value === "custom") {
+            input.disabled = false;
+            input.focus();
+            return;
+        }
+        input.value = value;
+        input.disabled = true;
+    }
+
+    function scheduleIsConfigured(cfg) {
+        if (!cfg) return false;
+        const hasRunnableConfig = (cfg.symbols || []).length && (cfg.types || []).length;
+        const hasSavedSchedule = !!(cfg.updated_at || cfg.last_run || cfg.next_run);
+        return !!(cfg.enabled || hasRunnableConfig || hasSavedSchedule);
+    }
+
+    function renderScheduleClock(cfg) {
+        document.querySelectorAll("[data-schedule-clock]").forEach(function(btn) {
+            if (!scheduleIsConfigured(cfg)) {
+                btn.dataset.scheduleConfigured = "0";
+                btn.classList.add("paused");
+                btn.innerHTML = "⏱ 设置";
+                btn.title = "Configure scheduled analysis trigger";
+                return;
+            }
+            btn.dataset.scheduleConfigured = "1";
+            btn.classList.toggle("paused", !cfg.enabled);
+            btn.innerHTML = cfg.enabled ? "⏱ 暂停" : "⏸ 恢复";
+            btn.title = cfg.enabled
+                ? "Scheduled analysis is enabled. Click to pause."
+                : "Scheduled analysis is paused. Click to resume.";
+        });
+    }
+
+    function loadScheduleTriggerStatus() {
+        fetch("/api/analysis-schedule")
+            .then(r => r.json())
+            .then(cfg => renderScheduleStatus(cfg))
+            .catch(() => renderScheduleClock(null));
+    }
+
+    function toggleScheduleTrigger() {
+        var configured = false;
+        document.querySelectorAll("[data-schedule-clock]").forEach(function(btn) {
+            if (btn.dataset.scheduleConfigured === "1") configured = true;
+        });
+        if (!configured) {
+            openSettings("schedule");
+            return;
+        }
+        fetch("/api/analysis-schedule/toggle", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+        })
+        .then(r => r.json().then(data => ({ ok: r.ok, data: data })))
+        .then(({ok, data}) => {
+            if (!ok || data.error) throw new Error(data.error || "Toggle failed");
+            renderScheduleStatus(data.schedule || {});
+        })
+        .catch(err => alert("❌ " + err.message));
+    }
+
+    function runScheduleNow() {
+        const status = document.getElementById("schedule-status");
+        if (status) status.textContent = "正在触发自动分析任务…";
+        fetch("/api/analysis-schedule/run-now", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+            .then(r => r.json().then(data => ({ ok: r.ok, data: data })))
+            .then(({ok, data}) => {
+                if (!ok || data.error) throw new Error(data.error || "Run failed");
+                renderScheduleStatus(data.schedule || {});
+                alert("✅ 自动分析任务已触发");
+            })
+            .catch(err => {
+                if (status) status.textContent = "触发失败：" + err.message;
+                alert("❌ " + err.message);
+            });
     }
 
     // Backdrop click — do NOT close (prevent accidental data loss)
@@ -2152,6 +2447,8 @@
             return 'API key rejected — update it in ⚙ Settings.';
         if (s.includes("ollama") || s.includes("11434") || s.includes("ConnectionRefused"))
             return 'Ollama not running — start with <code>ollama serve</code> or configure another LLM in ⚙ Settings.';
+        if (s.includes("TradingAgents tool-call") || s.includes("tool/function calling"))
+            return s;
         if (s.includes("timed out") || s.includes("timeout") || s.includes("Timeout"))
             return 'Request timed out — check your network/proxy or try a faster LLM model.';
         if (s.length > 200) s = s.slice(0, 200) + "…";
@@ -2238,6 +2535,9 @@
             brokerBtn.style.display = "block";
         } else {
             brokerBtn.style.display = "none";
+        }
+        if (klinePeriod === "daily" && data.symbol) {
+            loadKline(data.symbol);
         }
     }
 
@@ -2473,6 +2773,7 @@
 
     // Load watchlist on page init
     loadWatchlist();
+    loadScheduleTriggerStatus();
 
     // ── Broker Order Execution Functions ─────────────────────────────────
 
