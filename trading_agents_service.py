@@ -195,7 +195,11 @@ def _check_llm_reachable(llm_cfg: dict) -> str | None:
             err_msg = resp.text[:200]
         return f"LLM API chat works, but TradingAgents tool-call probe failed {resp.status_code}: {err_msg}"
     except requests.exceptions.Timeout:
-        return f"LLM API timed out during TradingAgents tool-call probe at {last_probe_url}."
+        return (
+            "LLM API chat works, but TradingAgents tool-call probe did not respond "
+            f"within 30s at {last_probe_url}. This usually means the selected model "
+            "or backend supports plain chat but not OpenAI-compatible tool/function calling."
+        )
     except requests.exceptions.ConnectionError:
         return f"Cannot reach LLM API at {base_url} during TradingAgents tool-call probe."
     except Exception as e:

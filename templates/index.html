@@ -2447,6 +2447,8 @@
             return 'API key rejected — update it in ⚙ Settings.';
         if (s.includes("ollama") || s.includes("11434") || s.includes("ConnectionRefused"))
             return 'Ollama not running — start with <code>ollama serve</code> or configure another LLM in ⚙ Settings.';
+        if (s.includes("TradingAgents tool-call") || s.includes("tool/function calling"))
+            return s;
         if (s.includes("timed out") || s.includes("timeout") || s.includes("Timeout"))
             return 'Request timed out — check your network/proxy or try a faster LLM model.';
         if (s.length > 200) s = s.slice(0, 200) + "…";
