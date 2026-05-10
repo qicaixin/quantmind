@@ -122,34 +122,84 @@ def _check_llm_reachable(llm_cfg: dict) -> str | None:
             return "LLM pre-flight failed: request was not sent."
         if resp.status_code in (200, 201):
             llm_cfg["base_url"] = api_base_from_endpoint_url(last_probe_url, "chat/completions")
-            return None
-        try:
-            data = resp.json() if resp.content else {}
-        except ValueError:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-        error = data.get("error")
-        if isinstance(error, dict):
-            err_msg = str(error.get("message") or resp.text[:200])
-            code = str(error.get("code") or "")
-        elif isinstance(error, str):
-            err_msg = error
-            code = ""
         else:
-            err_msg = resp.text[:200]
-            code = ""
-        if resp.status_code == 429 or code == "insufficient_quota":
-            return f"OpenAI quota exceeded — please check your billing at platform.openai.com."
-        if resp.status_code == 401:
-            return f"API key rejected (401). Please update it in ⚙ Settings."
-        return f"LLM API error {resp.status_code}: {err_msg}"
+            try:
+                data = resp.json() if resp.content else {}
+            except ValueError:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            error = data.get("error")
+            if isinstance(error, dict):
+                err_msg = str(error.get("message") or resp.text[:200])
+                code = str(error.get("code") or "")
+            elif isinstance(error, str):
+                err_msg = error
+                code = ""
+            else:
+                err_msg = resp.text[:200]
+                code = ""
+            if resp.status_code == 429 or code == "insufficient_quota":
+                return f"OpenAI quota exceeded — please check your billing at platform.openai.com."
+            if resp.status_code == 401:
+                return f"API key rejected (401). Please update it in ⚙ Settings."
+            return f"LLM API error {resp.status_code}: {err_msg}"
     except requests.exceptions.Timeout:
         return f"LLM API timed out at {last_probe_url}. Check network/proxy."
     except requests.exceptions.ConnectionError as e:
         return f"Cannot reach LLM API at {base_url}. Check URL in ⚙ Settings."
     except Exception as e:
         return f"LLM pre-flight failed: {e}"
+
+    tool_probe_body = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply with ok."}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "noop",
+                    "description": "No-op compatibility probe.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+        "tool_choice": "auto",
+        "max_tokens": 8,
+    }
+    try:
+        resp = requests.post(
+            last_probe_url,
+            json=tool_probe_body,
+            headers=headers,
+            proxies=proxies,
+            verify=False,
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            return None
+        try:
+            data = resp.json() if resp.content else {}
+        except ValueError:
+            data = {}
+        error = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error, dict):
+            err_msg = str(error.get("message") or resp.text[:200])
+        elif isinstance(error, str):
+            err_msg = error
+        else:
+            err_msg = resp.text[:200]
+        return f"LLM API chat works, but TradingAgents tool-call probe failed {resp.status_code}: {err_msg}"
+    except requests.exceptions.Timeout:
+        return f"LLM API timed out during TradingAgents tool-call probe at {last_probe_url}."
+    except requests.exceptions.ConnectionError:
+        return f"Cannot reach LLM API at {base_url} during TradingAgents tool-call probe."
+    except Exception as e:
+        return f"LLM tool-call pre-flight failed: {e}"
 
 
 # ---------------------------------------------------------------------------

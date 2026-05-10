@@ -17,6 +17,10 @@ _DEFAULT_CONFIG = {
 
 _MODEL_CACHE: dict[tuple[str, str], str] = {}
 _MODEL_PROBE_CANDIDATES = (
+    "claude-sonnet-4-5-20250929",
+    "claude-sonnet-4",
+    "claude-3-7-sonnet",
+    "claude-3-5-sonnet",
     "deepseek-v3",
     "deepseek-chat",
     "deepseek-r1",
@@ -151,7 +155,7 @@ def _select_chat_model(model_ids: list[str]) -> str:
                 return mid
     for mid in candidates:
         lowered = mid.lower()
-        if any(hint in lowered for hint in ("chat", "instruct", "gpt", "qwen", "deepseek", "glm")):
+        if any(hint in lowered for hint in ("chat", "instruct", "gpt", "qwen", "deepseek", "glm", "claude", "sonnet", "opus", "haiku")):
             return mid
     return candidates[0]
 
