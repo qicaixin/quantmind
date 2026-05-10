@@ -47,6 +47,17 @@ login_manager.init_app(app)
 login_manager.login_view = "login"
 
 
+def _cleanup_interrupted_ta_jobs() -> None:
+    config = ToolkitConfig()
+    trade_storage.fail_running_ta_jobs(
+        config,
+        "TradingAgents analysis was interrupted by an app restart or deployment. Please start a new analysis.",
+    )
+
+
+_cleanup_interrupted_ta_jobs()
+
+
 class User(UserMixin):
     def __init__(self, id: int, username: str, email: str):
         self.id = id

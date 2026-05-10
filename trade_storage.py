@@ -1350,6 +1350,25 @@ def load_ta_job(config: ToolkitConfig, job_id: str) -> dict | None:
     return _ta_row_to_dict(row)
 
 
+def fail_running_ta_jobs(config: ToolkitConfig, error: str) -> int:
+    """Mark running TradingAgents jobs as failed after app restart/deploy."""
+    ensure_storage(config)
+    completed_at = datetime.now().isoformat(timespec="seconds")
+    with closing(_connect(config)) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE ta_analyses
+            SET status = 'failed',
+                error = ?,
+                completed_at = ?
+            WHERE status = 'running'
+            """,
+            (error, completed_at),
+        )
+        conn.commit()
+        return cursor.rowcount
+
+
 def get_latest_ta_analysis(config: ToolkitConfig, symbol: str, *, user_id: int = DEFAULT_USER_ID) -> dict | None:
     ensure_storage(config)
     with closing(_connect(config)) as conn:
