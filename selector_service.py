@@ -250,6 +250,33 @@ def _ak():
         raise RuntimeError("akshare is not installed in this environment.") from exc
 
 
+def _normalize_hist_sina(df: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+    """Sina's stock_zh_a_daily returns: date, open, high, low, close, volume,
+    (amount). Translate to the EM Chinese-column schema the analyzer expects
+    and clip to the [start, end] window (Sina returns full history)."""
+    if df is None or df.empty:
+        return df
+    df = df.reset_index()
+    rename = {
+        "date": "日期", "open": "开盘", "close": "收盘",
+        "high": "最高", "low": "最低", "volume": "成交量",
+        "amount": "成交额",
+    }
+    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    if "成交额" not in df.columns and {"成交量", "收盘"}.issubset(df.columns):
+        # Sina volume is in 股 (shares); amount = volume * close.
+        df["成交额"] = (
+            pd.to_numeric(df["成交量"], errors="coerce").fillna(0)
+            * pd.to_numeric(df["收盘"], errors="coerce").fillna(0)
+        )
+    if "日期" in df.columns:
+        df["日期"] = pd.to_datetime(df["日期"]).dt.strftime("%Y-%m-%d")
+        s = pd.to_datetime(start).strftime("%Y-%m-%d")
+        e = pd.to_datetime(end).strftime("%Y-%m-%d")
+        df = df[(df["日期"] >= s) & (df["日期"] <= e)]
+    return df
+
+
 def _normalize_hist_tx(df: pd.DataFrame) -> pd.DataFrame:
     """Tencent's stock_zh_a_hist_tx returns columns: date, open, close, high,
     low, amount(volume in 手). Translate to the EM Chinese-column schema the
@@ -271,8 +298,28 @@ def _normalize_hist_tx(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fetch_hist_a(code: str, start: str, end: str) -> tuple[str, pd.DataFrame | None]:
+    """Per-symbol daily history with Sina-first fallback chain.
+
+    Order matches the rest of the app (Run Analysis / AI Analysis), which all
+    use Sina endpoints successfully on Hugging Face Spaces:
+
+    1. Sina  : ak.stock_zh_a_daily      (host: hq.sinajs.cn)
+    2. EM    : ak.stock_zh_a_hist        (host: push2.eastmoney.com — IP-blocked on HF)
+    3. Tencent: ak.stock_zh_a_hist_tx    (host: web.ifzq.gtimg.cn)
+    """
     ak = _ak()
-    # 1) East-Money (preferred — has 成交额 column natively)
+    sina_sym = ("sh" if code.startswith(("6", "9")) else "sz") + code
+
+    # 1) Sina (same endpoint family as Run Analysis / AI Analysis)
+    try:
+        hist = _retry(lambda: ak.stock_zh_a_daily(symbol=sina_sym, adjust="qfq"))
+        normalized = _normalize_hist_sina(hist, start, end)
+        if normalized is not None and not normalized.empty:
+            return code, normalized
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Sina history fetch failed for %s: %s", code, exc)
+
+    # 2) East-Money (works locally; blocked on HF datacenter IPs)
     try:
         hist = _retry(lambda: ak.stock_zh_a_hist(
             symbol=code, period="daily",
@@ -282,15 +329,17 @@ def _fetch_hist_a(code: str, start: str, end: str) -> tuple[str, pd.DataFrame | 
             return code, hist
     except Exception as exc:  # noqa: BLE001
         logger.debug("EM history fetch failed for %s: %s", code, exc)
-    # 2) Tencent fallback (different host: web.ifzq.gtimg.cn)
+
+    # 3) Tencent (last-resort; coarser amount proxy)
     try:
         hist_tx = _retry(lambda: ak.stock_zh_a_hist_tx(
-            symbol=("sh" if code.startswith(("6", "9")) else "sz") + code,
+            symbol=sina_sym,
             start_date=start, end_date=end, adjust="qfq",
         ))
         return code, _normalize_hist_tx(hist_tx)
     except Exception as exc:  # noqa: BLE001
         logger.debug("Tencent history fallback failed for %s: %s", code, exc)
+
     return code, None
 
 
@@ -460,7 +509,9 @@ def _analyze_hk(code: str, name: str, price: float, vol_today: float,
 
 def _get_a_spot() -> pd.DataFrame:
     """Fetch A-share spot snapshot, falling back across providers when the
-    HF datacenter IP is blocked by one of them.
+    HF datacenter IP is blocked by one of them. Sina-first to match the rest
+    of the app (Run Analysis / AI Analysis), which all use Sina successfully
+    on Hugging Face Spaces.
 
     Returns a DataFrame with EM-style Chinese columns: 代码 名称 最新价
     成交量 成交额 涨跌幅
@@ -468,7 +519,21 @@ def _get_a_spot() -> pd.DataFrame:
     ak = _ak()
     errors: list[str] = []
 
-    # 1) East-Money aggregate (preferred — fastest, fewest calls)
+    # 1) Sina aggregate (host: hq.sinajs.cn — same family as AI Analysis)
+    try:
+        df = _retry(lambda: ak.stock_zh_a_spot())
+        if df is not None and not df.empty:
+            if "代码" in df.columns:
+                df["代码"] = df["代码"].astype(str).str.replace(
+                    r"^(sh|sz|bj)", "", regex=True
+                )
+            logger.info("A spot via stock_zh_a_spot (Sina): %d rows", len(df))
+            return df
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"sina_aggregate: {exc}")
+        logger.warning("stock_zh_a_spot (Sina) failed: %s", exc)
+
+    # 2) East-Money aggregate (works locally; blocked on HF datacenter IPs)
     try:
         df = _retry(lambda: ak.stock_zh_a_spot_em())
         if df is not None and not df.empty:
@@ -478,26 +543,7 @@ def _get_a_spot() -> pd.DataFrame:
         errors.append(f"em_aggregate: {exc}")
         logger.warning("stock_zh_a_spot_em failed: %s", exc)
 
-    # 2) Sina aggregate (different host: hq.sinajs.cn)
-    try:
-        df = _retry(lambda: ak.stock_zh_a_spot())
-        if df is not None and not df.empty:
-            # Sina returns code WITHOUT prefix in 代码 (akshare strips it),
-            # but column names align with EM. Normalise just in case.
-            if "代码" in df.columns:
-                df["代码"] = df["代码"].astype(str).str.replace(
-                    r"^(sh|sz|bj)", "", regex=True
-                )
-            # Sina's column for amount is also 成交额 (in 元). Volume column
-            # may be 成交量 (in 股). Both compatible with EM analyzer.
-            logger.info("A spot via stock_zh_a_spot (Sina): %d rows", len(df))
-            return df
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"sina_aggregate: {exc}")
-        logger.warning("stock_zh_a_spot (Sina) failed: %s", exc)
-
-    # 3) East-Money per-board (sometimes board endpoints work when aggregate
-    #    is rate-limited). Combine SH + SZ.
+    # 3) East-Money per-board (last resort)
     try:
         parts = []
         for fn_name in ("stock_sh_a_spot_em", "stock_sz_a_spot_em"):
