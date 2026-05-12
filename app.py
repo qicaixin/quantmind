@@ -1387,8 +1387,8 @@ def watchlist_remove(symbol: str):
 # ── AI Stock Selector API (天量战法 etc.) ───────────────────────────────
 
 @app.route("/api/selector/strategies", methods=["GET"])
-@login_required
 def selector_strategies():
+    # Public: returns only static strategy metadata, no user data.
     return jsonify({"strategies": selector_service.list_strategies()})
 
 
