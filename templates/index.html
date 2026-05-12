@@ -703,13 +703,74 @@
             <button class="watchlist-add-btn" id="watchlist-add-btn" onclick="addToWatchlist()"
                     data-i18n="watchlist_add">+ Add</button>
         </div>
+        <button class="watchlist-add-btn" id="selector-open-btn"
+                style="width:100%;margin-top:8px;background:#7c3aed;"
+                onclick="openSelectorModal()"
+                data-i18n="selector_open">🎯 AI Selector</button>
     </div>
     <ul class="watchlist-list" id="watchlist-list">
         <li class="watchlist-empty" id="watchlist-empty" data-i18n="watchlist_empty">No stocks in watchlist</li>
     </ul>
 </aside>
 
-<!-- Main Content -->
+<!-- AI Selector Modal -->
+<div class="modal-backdrop" id="selector-modal">
+    <div class="modal" style="width:min(640px,94vw);">
+        <h3>🎯 <span data-i18n="selector_title">AI Stock Selector</span></h3>
+
+        <div id="selector-setup">
+            <label>
+                <span data-i18n="selector_market">Market</span>
+                <select id="selector-market">
+                    <option value="A" data-i18n="selector_market_a">A-shares</option>
+                    <option value="HK" data-i18n="selector_market_hk">Hong Kong</option>
+                    <option value="A,HK" data-i18n="selector_market_both">A-shares + HK</option>
+                </select>
+            </label>
+
+            <label>
+                <span data-i18n="selector_strategies">Strategies (天量战法)</span>
+                <div id="selector-strategy-list"
+                     style="display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid #d1d5db;border-radius:7px;background:#f9fafb;">
+                    <div style="color:#6b7280;font-size:12px;" data-i18n="selector_loading">Loading…</div>
+                </div>
+            </label>
+
+            <div style="display:flex;gap:10px;">
+                <label style="flex:1;">
+                    <span data-i18n="selector_top_a">Top-N A-shares by turnover</span>
+                    <input id="selector-top-a" type="number" min="20" max="1000" step="10" value="400">
+                </label>
+                <label style="flex:1;">
+                    <span data-i18n="selector_top_hk">Top-N HK by turnover</span>
+                    <input id="selector-top-hk" type="number" min="20" max="500" step="10" value="150">
+                </label>
+            </div>
+
+            <p style="font-size:12px;color:#92400e;background:#fef3c7;border:1px solid #fcd34d;border-radius:6px;padding:8px;"
+               data-i18n="selector_disclaimer">
+                ⚠️ For research only. Not investment advice.
+            </p>
+        </div>
+
+        <div id="selector-progress" style="display:none;">
+            <div style="margin:12px 0 8px;font-size:13px;color:#374151;" id="selector-progress-msg">Working…</div>
+            <div style="height:10px;background:#e5e7eb;border-radius:5px;overflow:hidden;">
+                <div id="selector-progress-bar" style="height:100%;width:0%;background:#7c3aed;transition:width .3s;"></div>
+            </div>
+        </div>
+
+        <div id="selector-results" style="display:none;max-height:50vh;overflow-y:auto;margin-top:14px;"></div>
+
+        <div class="modal-footer">
+            <button class="lang-btn" onclick="closeSelectorModal()" data-i18n="settings_cancel">Close</button>
+            <button class="settings-btn" id="selector-add-all-btn" style="display:none;background:#16a34a;"
+                    onclick="selectorAddAll()" data-i18n="selector_add_all">+ Add all to watchlist</button>
+            <button class="settings-btn" id="selector-run-btn" style="background:#7c3aed;"
+                    onclick="runSelector()" data-i18n="selector_run">Run Scan</button>
+        </div>
+    </div>
+</div>
 <div class="app-main">
 <div class="container">
     <div class="header-row">
@@ -1493,6 +1554,28 @@
             watchlist_add: "+ Add",
             watchlist_placeholder: "Stock code",
             watchlist_empty: "No stocks in watchlist",
+            selector_open: "🎯 AI Selector",
+            selector_title: "AI Stock Selector",
+            selector_market: "Market",
+            selector_market_a: "A-shares",
+            selector_market_hk: "Hong Kong",
+            selector_market_both: "A-shares + HK",
+            selector_strategies: "Strategies (Sky-Volume Tactics)",
+            selector_top_a: "Top-N A-shares by turnover",
+            selector_top_hk: "Top-N HK by turnover",
+            selector_run: "Run Scan",
+            selector_loading: "Loading…",
+            selector_starting: "Submitting…",
+            selector_no_picks: "No candidates found for today's scan.",
+            selector_found: "Found",
+            selector_trade_date: "Trade date",
+            selector_turnover: "Turnover",
+            selector_position: "Position",
+            selector_boards: " board(s)",
+            selector_add_all: "+ Add all to watchlist",
+            selector_added: "added",
+            selector_need_strategy: "Select at least one strategy.",
+            selector_disclaimer: "⚠️ For research only. Not investment advice.",
             latest_analysis_title: "Latest saved analysis",
             latest_no_analysis: "No saved Kronos analysis yet. Click Run Analysis to create one.",
             latest_loaded_prefix: "Loaded saved analysis",
@@ -1598,6 +1681,28 @@
             watchlist_add: "+ 添加",
             watchlist_placeholder: "输入股票代码",
             watchlist_empty: "暂无自选股",
+            selector_open: "🎯 AI 智能选股",
+            selector_title: "AI 智能选股",
+            selector_market: "市场",
+            selector_market_a: "A股",
+            selector_market_hk: "港股",
+            selector_market_both: "A股 + 港股",
+            selector_strategies: "策略（天量战法）",
+            selector_top_a: "A股按成交额取前 N",
+            selector_top_hk: "港股按成交额取前 N",
+            selector_run: "开始扫描",
+            selector_loading: "加载中…",
+            selector_starting: "提交中…",
+            selector_no_picks: "今日扫描未发现符合条件的标的。",
+            selector_found: "命中",
+            selector_trade_date: "交易日",
+            selector_turnover: "成交额",
+            selector_position: "位置",
+            selector_boards: "板",
+            selector_add_all: "+ 全部加入自选",
+            selector_added: "已加入",
+            selector_need_strategy: "请至少选择一个策略。",
+            selector_disclaimer: "⚠️ 本工具仅作研究用途，不构成投资建议。",
             latest_analysis_title: "最近保存的分析",
             latest_no_analysis: "还没有保存的 Kronos 分析。点击“运行分析”后会自动保存。",
             latest_loaded_prefix: "已加载保存的分析",
@@ -2773,6 +2878,228 @@
 
     // Load watchlist on page init
     loadWatchlist();
+
+    // ── AI Selector ──────────────────────────────────────────────────
+    var selectorStrategies = [];
+    var selectorJobId = null;
+    var selectorPollTimer = null;
+    var selectorPicks = [];
+
+    function openSelectorModal() {
+        document.getElementById("selector-modal").classList.add("open");
+        document.getElementById("selector-setup").style.display = "";
+        document.getElementById("selector-progress").style.display = "none";
+        document.getElementById("selector-results").style.display = "none";
+        document.getElementById("selector-add-all-btn").style.display = "none";
+        document.getElementById("selector-run-btn").disabled = false;
+        if (!selectorStrategies.length) loadSelectorStrategies();
+    }
+
+    function closeSelectorModal() {
+        document.getElementById("selector-modal").classList.remove("open");
+        if (selectorPollTimer) { clearTimeout(selectorPollTimer); selectorPollTimer = null; }
+    }
+
+    function loadSelectorStrategies() {
+        fetch("/api/selector/strategies")
+            .then(r => r.json())
+            .then(data => {
+                selectorStrategies = data.strategies || [];
+                renderSelectorStrategyList();
+            })
+            .catch(err => console.error("Selector strategies load failed:", err));
+    }
+
+    function renderSelectorStrategyList() {
+        var box = document.getElementById("selector-strategy-list");
+        var t = i18n[currentLang] || i18n.en;
+        if (!selectorStrategies.length) {
+            box.innerHTML = '<div style="color:#6b7280;font-size:12px;">' + (t.selector_loading || "Loading…") + '</div>';
+            return;
+        }
+        var html = "";
+        selectorStrategies.forEach(function(s, idx) {
+            var lbl = currentLang === "zh" ? s.label_zh : s.label_en;
+            var dsc = currentLang === "zh" ? s.description_zh : s.description_en;
+            html += '<label style="display:flex;align-items:flex-start;gap:8px;font-weight:400;margin:0;cursor:pointer;">'
+                 + '<input type="checkbox" class="selector-strat-cb" value="' + escHtml(s.key) + '"' + (idx < 2 ? ' checked' : '') + ' style="width:auto;margin-top:3px;">'
+                 + '<div><div style="font-weight:600;">' + escHtml(lbl) + '</div>'
+                 + '<div style="font-size:11px;color:#6b7280;">' + escHtml(dsc) + '</div></div>'
+                 + '</label>';
+        });
+        box.innerHTML = html;
+    }
+
+    function runSelector() {
+        var marketSel = document.getElementById("selector-market").value;
+        var markets = marketSel.split(",");
+        var strategies = [];
+        document.querySelectorAll(".selector-strat-cb:checked").forEach(function(cb) {
+            strategies.push(cb.value);
+        });
+        var t = i18n[currentLang] || i18n.en;
+        if (!strategies.length) {
+            alert(t.selector_need_strategy || "Select at least one strategy.");
+            return;
+        }
+        var topA = parseInt(document.getElementById("selector-top-a").value, 10) || 400;
+        var topHK = parseInt(document.getElementById("selector-top-hk").value, 10) || 150;
+
+        document.getElementById("selector-setup").style.display = "none";
+        document.getElementById("selector-progress").style.display = "";
+        document.getElementById("selector-results").style.display = "none";
+        document.getElementById("selector-run-btn").disabled = true;
+        document.getElementById("selector-progress-msg").textContent = t.selector_starting || "Submitting…";
+        document.getElementById("selector-progress-bar").style.width = "0%";
+
+        fetch("/api/selector/run", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                markets: markets, strategies: strategies,
+                top_n_a: topA, top_n_hk: topHK,
+            }),
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                alert(data.error);
+                document.getElementById("selector-setup").style.display = "";
+                document.getElementById("selector-progress").style.display = "none";
+                document.getElementById("selector-run-btn").disabled = false;
+                return;
+            }
+            selectorJobId = data.job_id;
+            pollSelectorJob();
+        })
+        .catch(err => {
+            alert("Failed to start: " + err);
+            document.getElementById("selector-setup").style.display = "";
+            document.getElementById("selector-progress").style.display = "none";
+            document.getElementById("selector-run-btn").disabled = false;
+        });
+    }
+
+    function pollSelectorJob() {
+        if (!selectorJobId) return;
+        fetch("/api/selector/job/" + selectorJobId)
+            .then(r => r.json())
+            .then(job => {
+                var pct = Math.round((job.progress || 0) * 100);
+                document.getElementById("selector-progress-bar").style.width = pct + "%";
+                document.getElementById("selector-progress-msg").textContent =
+                    (job.message || "") + " (" + pct + "%)";
+                if (job.status === "done") {
+                    renderSelectorResults(job.result || {});
+                } else if (job.status === "failed") {
+                    document.getElementById("selector-progress-msg").textContent =
+                        "❌ " + (job.error || "Failed");
+                    document.getElementById("selector-run-btn").disabled = false;
+                } else {
+                    selectorPollTimer = setTimeout(pollSelectorJob, 1500);
+                }
+            })
+            .catch(err => {
+                console.error("Poll error:", err);
+                selectorPollTimer = setTimeout(pollSelectorJob, 3000);
+            });
+    }
+
+    function renderSelectorResults(result) {
+        var t = i18n[currentLang] || i18n.en;
+        selectorPicks = result.picks || [];
+        var box = document.getElementById("selector-results");
+        document.getElementById("selector-progress").style.display = "none";
+        box.style.display = "";
+        document.getElementById("selector-run-btn").disabled = false;
+
+        if (!selectorPicks.length) {
+            box.innerHTML = '<div style="padding:14px;text-align:center;color:#6b7280;">'
+                + (t.selector_no_picks || "No candidates found for today's scan.")
+                + '</div>';
+            document.getElementById("selector-add-all-btn").style.display = "none";
+            return;
+        }
+
+        // Strategy key → label map
+        var labelMap = {};
+        selectorStrategies.forEach(function(s) {
+            labelMap[s.key] = currentLang === "zh" ? s.label_zh : s.label_en;
+        });
+
+        var html = '<div style="font-size:12px;color:#6b7280;margin-bottom:8px;">'
+                 + (t.selector_found || "Found") + ' ' + selectorPicks.length
+                 + ' · ' + (t.selector_trade_date || "Trade date") + ': ' + escHtml(result.trade_date || "")
+                 + ' · ' + (result.duration_sec || 0) + 's</div>';
+        selectorPicks.forEach(function(p, i) {
+            var stratLabels = (p.strategies || []).map(function(k) { return labelMap[k] || k; }).join(" · ");
+            var pctColor = (p.pct_chg || 0) >= 0 ? "#dc2626" : "#16a34a";
+            html += '<div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px;margin-bottom:8px;background:#fff;">'
+                 + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">'
+                 + '<div><b>[' + (i+1) + '] ' + escHtml(p.name) + '</b> '
+                 + '<span style="font-family:monospace;color:#6b7280;">' + escHtml(p.symbol) + '</span> '
+                 + '<span style="font-size:11px;background:#ede9fe;color:#6d28d9;padding:1px 6px;border-radius:4px;margin-left:4px;">'
+                 + escHtml(p.market) + '</span></div>'
+                 + '<button class="watchlist-add-btn" style="padding:4px 10px;font-size:12px;" '
+                 + 'onclick="selectorAddOne(\'' + escHtml(p.symbol) + '\', this)">+ ' + (t.watchlist_add || "Add") + '</button>'
+                 + '</div>'
+                 + '<div style="font-size:12px;color:#374151;margin-top:4px;">'
+                 + '¥' + (p.price || 0) + ' · '
+                 + '<span style="color:' + pctColor + ';">' + (p.pct_chg >= 0 ? "+" : "") + p.pct_chg + '%</span> · '
+                 + (t.selector_turnover || "Turnover") + ' ' + p.amount_yi + '亿 · '
+                 + (t.selector_position || "Position") + ' ' + p.position_pct + '%'
+                 + (p.board_count ? ' · ' + p.board_count + (t.selector_boards || "板") : "")
+                 + '</div>'
+                 + '<div style="font-size:11px;color:#6d28d9;margin-top:4px;font-weight:600;">' + escHtml(stratLabels) + '</div>'
+                 + '<div style="font-size:11px;color:#4b5563;margin-top:4px;white-space:pre-wrap;">' + escHtml((p.reasons || []).join("\n")) + '</div>'
+                 + '</div>';
+        });
+        box.innerHTML = html;
+        document.getElementById("selector-add-all-btn").style.display = "";
+    }
+
+    function selectorAddOne(symbol, btn) {
+        if (btn) { btn.disabled = true; btn.textContent = "..."; }
+        fetch("/api/selector/add_picks", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ symbols: [symbol] }),
+        })
+        .then(r => r.json())
+        .then(data => {
+            watchlistData = data.items || [];
+            renderWatchlist();
+            if (btn) { btn.textContent = "✓"; btn.style.background = "#16a34a"; }
+        })
+        .catch(err => {
+            if (btn) { btn.disabled = false; btn.textContent = "+ Add"; }
+            alert("Failed: " + err);
+        });
+    }
+
+    function selectorAddAll() {
+        if (!selectorPicks.length) return;
+        var btn = document.getElementById("selector-add-all-btn");
+        btn.disabled = true;
+        var symbols = selectorPicks.map(function(p) { return p.symbol; });
+        fetch("/api/selector/add_picks", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ symbols: symbols }),
+        })
+        .then(r => r.json())
+        .then(data => {
+            watchlistData = data.items || [];
+            renderWatchlist();
+            var t = i18n[currentLang] || i18n.en;
+            btn.textContent = "✓ " + (data.added || []).length + " " + (t.selector_added || "added");
+        })
+        .catch(err => {
+            btn.disabled = false;
+            alert("Failed: " + err);
+        });
+    }
+
     loadScheduleTriggerStatus();
 
     // ── Broker Order Execution Functions ─────────────────────────────────

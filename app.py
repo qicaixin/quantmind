@@ -14,6 +14,7 @@ from config import ToolkitConfig
 from data_sources import get_kline_data, get_last_close, get_realtime_quote, get_stock_name, get_t0_indicators, normalize_symbol
 from llm_service import analyze_t0
 from strategy_catalog import strategy_options
+import selector_service
 import trade_storage
 import trading_agents_service as ta_service
 from trading_service import (
@@ -1381,6 +1382,74 @@ def watchlist_remove(symbol: str):
     trade_storage.remove_watchlist_item(config, sym, user_id=_uid())
     items = trade_storage.get_watchlist(config, user_id=_uid())
     return jsonify({"items": items})
+
+
+# ── AI Stock Selector API (天量战法 etc.) ───────────────────────────────
+
+@app.route("/api/selector/strategies", methods=["GET"])
+@login_required
+def selector_strategies():
+    return jsonify({"strategies": selector_service.list_strategies()})
+
+
+@app.route("/api/selector/run", methods=["POST"])
+@login_required
+def selector_run():
+    payload = request.get_json(silent=True) or {}
+    markets = payload.get("markets") or ["A"]
+    strategies = payload.get("strategies") or []
+    top_n_a = int(payload.get("top_n_a") or selector_service.DEFAULT_TOP_ACTIVE_A)
+    top_n_hk = int(payload.get("top_n_hk") or selector_service.DEFAULT_TOP_ACTIVE_HK)
+    max_workers = int(payload.get("max_workers") or selector_service.DEFAULT_MAX_WORKERS)
+
+    try:
+        job_id = selector_service.submit_job(
+            ToolkitConfig(),
+            markets=markets,
+            strategies=strategies,
+            top_n_a=top_n_a,
+            top_n_hk=top_n_hk,
+            max_workers=max_workers,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/selector/job/<job_id>", methods=["GET"])
+@login_required
+def selector_job(job_id: str):
+    job = selector_service.get_job(job_id)
+    if not job:
+        return jsonify({"error": "job not found"}), 404
+    # Trim heavy traceback unless explicitly requested
+    if "traceback" in job and not request.args.get("debug"):
+        job = {k: v for k, v in job.items() if k != "traceback"}
+    return jsonify(job)
+
+
+@app.route("/api/selector/add_picks", methods=["POST"])
+@login_required
+def selector_add_picks():
+    payload = request.get_json(silent=True) or {}
+    symbols = payload.get("symbols") or []
+    if not isinstance(symbols, list) or not symbols:
+        return jsonify({"error": "symbols required"}), 400
+
+    config = ToolkitConfig()
+    trade_storage.ensure_storage(config)
+    added: list[str] = []
+    failed: list[dict] = []
+    for raw in symbols:
+        try:
+            sym = normalize_symbol(str(raw).strip())
+            name = get_stock_name(sym)
+            trade_storage.add_watchlist_item(config, sym, name, user_id=_uid())
+            added.append(sym)
+        except Exception as exc:  # noqa: BLE001
+            failed.append({"symbol": raw, "error": str(exc)})
+    items = trade_storage.get_watchlist(config, user_id=_uid())
+    return jsonify({"added": added, "failed": failed, "items": items})
 
 
 start_analysis_scheduler()
