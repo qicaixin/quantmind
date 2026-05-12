@@ -736,6 +736,22 @@
                 </div>
             </label>
 
+            <label>
+                <span style="display:flex;align-items:center;justify-content:space-between;">
+                    <span data-i18n="selector_my_strategies">My Custom Strategies</span>
+                    <span style="font-weight:400;">
+                        <button type="button" class="lang-btn" style="padding:3px 8px;font-size:11px;"
+                                onclick="openStrategyBuilder()" data-i18n="selector_new_from_form">➕ New from Form</button>
+                        <button type="button" class="lang-btn" style="padding:3px 8px;font-size:11px;"
+                                onclick="openStrategyNL()" data-i18n="selector_new_from_prompt">🤖 New from Prompt</button>
+                    </span>
+                </span>
+                <div id="selector-user-strategy-list"
+                     style="display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid #d1d5db;border-radius:7px;background:#f9fafb;min-height:36px;">
+                    <div style="color:#6b7280;font-size:12px;" data-i18n="selector_loading">Loading…</div>
+                </div>
+            </label>
+
             <div style="display:flex;gap:10px;">
                 <label style="flex:1;">
                     <span data-i18n="selector_top_a">Top-N A-shares by turnover</span>
@@ -771,6 +787,82 @@
         </div>
     </div>
 </div>
+
+<!-- Strategy Builder sub-modal (Phase 2a) -->
+<div class="modal-backdrop" id="strategy-builder-modal">
+    <div class="modal" style="width:min(720px,95vw);">
+        <h3>🛠 <span data-i18n="sb_title">Strategy Builder</span></h3>
+        <input type="hidden" id="sb-edit-id" value="">
+        <label>
+            <span data-i18n="sb_label">Label</span>
+            <input id="sb-label" type="text" maxlength="60" placeholder="我的突破策略">
+        </label>
+        <label>
+            <span data-i18n="sb_description">Description (optional)</span>
+            <input id="sb-description" type="text" maxlength="500">
+        </label>
+        <label>
+            <span data-i18n="sb_match_mode">Match mode</span>
+            <div style="display:flex;gap:14px;align-items:center;">
+                <label style="font-weight:400;margin:0;display:flex;align-items:center;gap:6px;">
+                    <input type="radio" name="sb-mode" value="AND" checked
+                           style="width:auto;margin:0;" onchange="updateSbMode()">
+                    <span data-i18n="sb_mode_and">ALL rules match (AND)</span>
+                </label>
+                <label style="font-weight:400;margin:0;display:flex;align-items:center;gap:6px;">
+                    <input type="radio" name="sb-mode" value="OR_AT_LEAST"
+                           style="width:auto;margin:0;" onchange="updateSbMode()">
+                    <span data-i18n="sb_mode_or">At least</span>
+                    <input id="sb-min-match" type="number" min="1" value="1"
+                           style="width:60px;padding:2px 6px;" disabled>
+                    <span data-i18n="sb_mode_or_suffix">rule(s) match</span>
+                </label>
+            </div>
+        </label>
+        <div style="margin-top:12px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <strong data-i18n="sb_rules">Rules</strong>
+                <button type="button" class="lang-btn" style="padding:3px 9px;font-size:11px;"
+                        onclick="sbAddRule()" data-i18n="sb_add_rule">+ Add rule</button>
+            </div>
+            <div id="sb-rules-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+        </div>
+        <details style="margin-top:10px;font-size:11px;color:#6b7280;">
+            <summary style="cursor:pointer;" data-i18n="sb_preview_json">Preview JSON</summary>
+            <pre id="sb-json-preview" style="background:#f3f4f6;padding:8px;border-radius:6px;max-height:160px;overflow:auto;"></pre>
+        </details>
+        <div id="sb-errors" style="display:none;color:#b91c1c;font-size:12px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:8px;margin-top:10px;"></div>
+        <div class="modal-footer">
+            <button class="lang-btn" onclick="closeStrategyBuilder()" data-i18n="settings_cancel">Cancel</button>
+            <button class="settings-btn" style="background:#7c3aed;" onclick="saveStrategy()" data-i18n="sb_save">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- NL Prompt sub-modal (Phase 2b) -->
+<div class="modal-backdrop" id="strategy-nl-modal">
+    <div class="modal" style="width:min(620px,94vw);">
+        <h3>🤖 <span data-i18n="nl_title">Describe Your Strategy</span></h3>
+        <p style="font-size:12px;color:#6b7280;margin:4px 0 10px;" data-i18n="nl_hint">
+            Type a natural-language description; the LLM will compile it into rules using the available metrics. You can review and tweak before saving.
+        </p>
+        <div style="font-size:11px;color:#6b7280;margin-bottom:8px;">
+            <strong data-i18n="nl_examples">Examples:</strong>
+            <ul style="margin:4px 0 0 16px;padding:0;">
+                <li>放量突破60日新高且站上20日均线</li>
+                <li>5日量比&gt;1.5 且 RSI 在50-70之间</li>
+                <li>Stocks with at least 2 consecutive up days and price near 60d high (&gt;70%)</li>
+            </ul>
+        </div>
+        <textarea id="nl-prompt" rows="4" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:13px;" placeholder="找出..."></textarea>
+        <div id="nl-status" style="display:none;font-size:12px;margin-top:8px;"></div>
+        <div class="modal-footer">
+            <button class="lang-btn" onclick="closeStrategyNL()" data-i18n="settings_cancel">Cancel</button>
+            <button class="settings-btn" id="nl-generate-btn" style="background:#7c3aed;" onclick="compileNL()" data-i18n="nl_generate">Generate</button>
+        </div>
+    </div>
+</div>
+
 <div class="app-main">
 <div class="container">
     <div class="header-row">
@@ -1576,6 +1668,26 @@
             selector_added: "added",
             selector_need_strategy: "Select at least one strategy.",
             selector_disclaimer: "⚠️ For research only. Not investment advice.",
+            selector_my_strategies: "My Custom Strategies",
+            selector_new_from_form: "➕ New from Form",
+            selector_new_from_prompt: "🤖 New from Prompt",
+            selector_no_user: "No custom strategies yet. Click ➕ or 🤖 above to create one.",
+            selector_confirm_delete: "Delete this strategy?",
+            sb_title: "Strategy Builder",
+            sb_label: "Label",
+            sb_description: "Description (optional)",
+            sb_match_mode: "Match mode",
+            sb_mode_and: "ALL rules match (AND)",
+            sb_mode_or: "At least",
+            sb_mode_or_suffix: "rule(s) match",
+            sb_rules: "Rules",
+            sb_add_rule: "+ Add rule",
+            sb_preview_json: "Preview JSON",
+            sb_save: "Save",
+            nl_title: "Describe Your Strategy",
+            nl_hint: "Type a natural-language description; the LLM will compile it into rules. Review and tweak before saving.",
+            nl_examples: "Examples:",
+            nl_generate: "Generate",
             latest_analysis_title: "Latest saved analysis",
             latest_no_analysis: "No saved Kronos analysis yet. Click Run Analysis to create one.",
             latest_loaded_prefix: "Loaded saved analysis",
@@ -1703,6 +1815,26 @@
             selector_added: "已加入",
             selector_need_strategy: "请至少选择一个策略。",
             selector_disclaimer: "⚠️ 本工具仅作研究用途，不构成投资建议。",
+            selector_my_strategies: "我的自定义策略",
+            selector_new_from_form: "➕ 表单新建",
+            selector_new_from_prompt: "🤖 描述新建",
+            selector_no_user: "暂无自定义策略，点击上方 ➕ 或 🤖 创建。",
+            selector_confirm_delete: "删除此策略？",
+            sb_title: "策略生成器",
+            sb_label: "名称",
+            sb_description: "描述（可选）",
+            sb_match_mode: "匹配模式",
+            sb_mode_and: "全部规则满足 (AND)",
+            sb_mode_or: "至少",
+            sb_mode_or_suffix: "条规则满足",
+            sb_rules: "规则",
+            sb_add_rule: "+ 添加规则",
+            sb_preview_json: "预览 JSON",
+            sb_save: "保存",
+            nl_title: "用自然语言描述策略",
+            nl_hint: "输入策略描述，LLM 会编译为规则，保存前可调整。",
+            nl_examples: "示例：",
+            nl_generate: "生成",
             latest_analysis_title: "最近保存的分析",
             latest_no_analysis: "还没有保存的 Kronos 分析。点击“运行分析”后会自动保存。",
             latest_loaded_prefix: "已加载保存的分析",
@@ -2916,6 +3048,8 @@
         // Render immediately from fallback, then refresh from API in background.
         renderSelectorStrategyList();
         loadSelectorStrategies();
+        loadUserStrategies();
+        loadMetricCatalog();
     }
 
     function closeSelectorModal() {
@@ -2963,12 +3097,327 @@
         box.innerHTML = html;
     }
 
+    // ── My Custom Strategies (Phase 2) ──────────────────────────────────
+    var userStrategies = [];
+    var metricCatalog = [];
+    var operatorCatalog = [];
+
+    function loadUserStrategies() {
+        var box = document.getElementById("selector-user-strategy-list");
+        fetch("/api/selector/my-strategies", { credentials: "same-origin", redirect: "manual" })
+            .then(function(r) {
+                if (!r.ok || r.type === "opaqueredirect") return null;
+                var ct = r.headers.get("content-type") || "";
+                if (ct.indexOf("application/json") < 0) return null;
+                return r.json();
+            })
+            .then(function(data) {
+                userStrategies = (data && data.strategies) || [];
+                renderUserStrategyList();
+            })
+            .catch(function(err) {
+                console.warn("user strategies load failed", err);
+                if (box) box.innerHTML = '<div style="color:#6b7280;font-size:12px;">Login required.</div>';
+            });
+    }
+
+    function loadMetricCatalog() {
+        if (metricCatalog.length) return;
+        fetch("/api/selector/metric-catalog", { credentials: "same-origin" })
+            .then(r => r.ok ? r.json() : null)
+            .then(function(data) {
+                if (!data) return;
+                metricCatalog = data.metrics || [];
+                operatorCatalog = data.operators || [];
+            })
+            .catch(function(err) { console.warn("metric catalog failed", err); });
+    }
+
+    function renderUserStrategyList() {
+        var box = document.getElementById("selector-user-strategy-list");
+        if (!box) return;
+        var t = I18N[currentLang] || I18N.en;
+        if (!userStrategies.length) {
+            box.innerHTML = '<div style="color:#6b7280;font-size:12px;">'
+                + (t.selector_no_user || "No custom strategies yet. Click ➕ or 🤖 above to create one.")
+                + '</div>';
+            return;
+        }
+        var html = "";
+        userStrategies.forEach(function(s) {
+            var ruleCount = (s.rules && s.rules.length) || 0;
+            var modeLabel = s.match_mode === "OR_AT_LEAST"
+                ? "≥" + (s.min_match_rules || 1) + "/" + ruleCount
+                : "AND " + ruleCount;
+            html += '<div style="display:flex;align-items:center;gap:8px;">'
+                 + '<input type="checkbox" class="selector-user-strat-cb" value="' + escHtml(s.id) + '"'
+                 + (s.enabled ? ' checked' : '') + ' style="width:auto;margin:0;">'
+                 + '<div style="flex:1;min-width:0;">'
+                 +   '<div style="font-weight:600;font-size:13px;">' + escHtml(s.label || s.id) + '</div>'
+                 +   '<div style="font-size:11px;color:#6b7280;">' + escHtml(s.description || "") + ' · ' + modeLabel + '</div>'
+                 + '</div>'
+                 + '<button type="button" class="lang-btn" style="padding:3px 8px;font-size:11px;" onclick="editUserStrategy(\'' + escHtml(s.id) + '\')">✎</button>'
+                 + '<button type="button" class="lang-btn" style="padding:3px 8px;font-size:11px;color:#b91c1c;" onclick="deleteUserStrategy(\'' + escHtml(s.id) + '\')">✕</button>'
+                 + '</div>';
+        });
+        box.innerHTML = html;
+    }
+
+    function deleteUserStrategy(sid) {
+        var t = I18N[currentLang] || I18N.en;
+        if (!confirm(t.selector_confirm_delete || "Delete this strategy?")) return;
+        fetch("/api/selector/my-strategies/" + encodeURIComponent(sid), { method: "DELETE" })
+            .then(r => r.json())
+            .then(function(data) {
+                if (data && data.error) { alert(data.error); return; }
+                loadUserStrategies();
+            });
+    }
+
+    function editUserStrategy(sid) {
+        var s = userStrategies.find(function(x) { return x.id === sid; });
+        if (!s) return;
+        openStrategyBuilder(s);
+    }
+
+    // ── Strategy Builder modal ──────────────────────────────────────────
+    function openStrategyBuilder(existing) {
+        loadMetricCatalog();
+        document.getElementById("strategy-builder-modal").classList.add("open");
+        document.getElementById("sb-errors").style.display = "none";
+        document.getElementById("sb-edit-id").value = existing ? existing.id : "";
+        document.getElementById("sb-label").value = existing ? (existing.label || "") : "";
+        document.getElementById("sb-description").value = existing ? (existing.description || "") : "";
+        var mode = (existing && existing.match_mode) || "AND";
+        document.querySelectorAll('input[name="sb-mode"]').forEach(function(r) { r.checked = r.value === mode; });
+        document.getElementById("sb-min-match").value = (existing && existing.min_match_rules) || 1;
+        updateSbMode();
+        var rules = (existing && existing.rules) ? existing.rules : [{ metric: "", op: "", value: "" }];
+        document.getElementById("sb-rules-list").innerHTML = "";
+        rules.forEach(function(r) { sbAddRule(r); });
+        updateSbPreview();
+    }
+
+    function closeStrategyBuilder() {
+        document.getElementById("strategy-builder-modal").classList.remove("open");
+    }
+
+    function updateSbMode() {
+        var mode = document.querySelector('input[name="sb-mode"]:checked').value;
+        document.getElementById("sb-min-match").disabled = (mode !== "OR_AT_LEAST");
+        updateSbPreview();
+    }
+
+    function sbAddRule(prefill) {
+        if (!metricCatalog.length) {
+            // try to load and retry
+            loadMetricCatalog();
+            setTimeout(function() { sbAddRule(prefill); }, 400);
+            return;
+        }
+        var list = document.getElementById("sb-rules-list");
+        var row = document.createElement("div");
+        row.className = "sb-rule-row";
+        row.style.cssText = "display:flex;gap:6px;align-items:center;";
+        var metricSel = '<select class="sb-rule-metric" style="flex:1;">';
+        metricSel += '<option value="">— metric —</option>';
+        metricCatalog.forEach(function(m) {
+            var sel = (prefill && prefill.metric === m.key) ? ' selected' : '';
+            metricSel += '<option value="' + escHtml(m.key) + '" data-type="' + escHtml(m.type) + '"' + sel + '>'
+                       + escHtml(m.label || m.key) + '</option>';
+        });
+        metricSel += '</select>';
+        var opSel = '<select class="sb-rule-op" style="width:90px;"></select>';
+        var valIn = '<span class="sb-rule-value-wrap" style="flex:1;"><input class="sb-rule-value" type="text" placeholder="value"' + (prefill ? ' value="' + escHtml(formatRuleValue(prefill.value)) + '"' : '') + ' style="width:100%;"></span>';
+        var del = '<button type="button" class="lang-btn" style="padding:3px 8px;font-size:11px;color:#b91c1c;" onclick="this.parentElement.remove();updateSbPreview();">✕</button>';
+        row.innerHTML = metricSel + opSel + valIn + del;
+        list.appendChild(row);
+        var metricEl = row.querySelector(".sb-rule-metric");
+        var opEl = row.querySelector(".sb-rule-op");
+        metricEl.addEventListener("change", function() {
+            populateOpsForMetric(metricEl, opEl, prefill && prefill.op);
+            updateValueInput(row);
+            updateSbPreview();
+        });
+        opEl.addEventListener("change", function() { updateValueInput(row); updateSbPreview(); });
+        row.querySelector(".sb-rule-value").addEventListener("input", updateSbPreview);
+        populateOpsForMetric(metricEl, opEl, prefill && prefill.op);
+        updateValueInput(row);
+    }
+
+    function formatRuleValue(v) {
+        if (Array.isArray(v)) return v.join(",");
+        if (v === true) return "true";
+        if (v === false) return "false";
+        return v === undefined || v === null ? "" : String(v);
+    }
+
+    function populateOpsForMetric(metricEl, opEl, preferred) {
+        var selected = metricEl.options[metricEl.selectedIndex];
+        var mtype = selected ? selected.getAttribute("data-type") : "";
+        opEl.innerHTML = "";
+        operatorCatalog.forEach(function(op) {
+            if (!op.types || op.types.indexOf(mtype) >= 0) {
+                var el = document.createElement("option");
+                el.value = op.key;
+                el.textContent = op.label || op.key;
+                if (preferred && op.key === preferred) el.selected = true;
+                opEl.appendChild(el);
+            }
+        });
+    }
+
+    function updateValueInput(row) {
+        var metricEl = row.querySelector(".sb-rule-metric");
+        var opEl = row.querySelector(".sb-rule-op");
+        var wrap = row.querySelector(".sb-rule-value-wrap");
+        var selOpt = metricEl.options[metricEl.selectedIndex];
+        var mtype = selOpt ? selOpt.getAttribute("data-type") : "";
+        var op = opEl.value;
+        var existing = (wrap.querySelector(".sb-rule-value") || {}).value || "";
+        if (mtype === "bool") {
+            wrap.innerHTML = '<select class="sb-rule-value" style="width:100%;"><option value="true">true</option><option value="false">false</option></select>';
+            wrap.querySelector(".sb-rule-value").value = (existing === "false") ? "false" : "true";
+        } else if (op === "between") {
+            var parts = existing.split(",");
+            wrap.innerHTML = '<input class="sb-rule-value sb-rule-lo" type="number" step="any" placeholder="min" value="' + escHtml(parts[0] || "") + '" style="width:48%;">'
+                          + ' <input class="sb-rule-hi" type="number" step="any" placeholder="max" value="' + escHtml(parts[1] || "") + '" style="width:48%;">';
+        } else {
+            wrap.innerHTML = '<input class="sb-rule-value" type="number" step="any" placeholder="value" value="' + escHtml(existing) + '" style="width:100%;">';
+        }
+        wrap.querySelectorAll("input,select").forEach(function(el) {
+            el.addEventListener("input", updateSbPreview);
+            el.addEventListener("change", updateSbPreview);
+        });
+    }
+
+    function collectStrategyDoc() {
+        var rules = [];
+        document.querySelectorAll("#sb-rules-list .sb-rule-row").forEach(function(row) {
+            var metric = row.querySelector(".sb-rule-metric").value;
+            var op = row.querySelector(".sb-rule-op").value;
+            if (!metric || !op) return;
+            var selOpt = row.querySelector(".sb-rule-metric").options[row.querySelector(".sb-rule-metric").selectedIndex];
+            var mtype = selOpt ? selOpt.getAttribute("data-type") : "";
+            var value;
+            if (mtype === "bool") {
+                value = row.querySelector(".sb-rule-value").value === "true";
+            } else if (op === "between") {
+                var lo = parseFloat(row.querySelector(".sb-rule-lo").value);
+                var hi = parseFloat(row.querySelector(".sb-rule-hi").value);
+                value = [isNaN(lo) ? null : lo, isNaN(hi) ? null : hi];
+            } else {
+                value = parseFloat(row.querySelector(".sb-rule-value").value);
+                if (isNaN(value)) value = null;
+            }
+            rules.push({ metric: metric, op: op, value: value });
+        });
+        var mode = document.querySelector('input[name="sb-mode"]:checked').value;
+        var doc = {
+            label: document.getElementById("sb-label").value.trim(),
+            description: document.getElementById("sb-description").value.trim(),
+            match_mode: mode,
+            min_match_rules: parseInt(document.getElementById("sb-min-match").value, 10) || 1,
+            rules: rules,
+            enabled: true,
+        };
+        return doc;
+    }
+
+    function updateSbPreview() {
+        var preview = document.getElementById("sb-json-preview");
+        if (preview) preview.textContent = JSON.stringify(collectStrategyDoc(), null, 2);
+    }
+
+    function saveStrategy() {
+        var doc = collectStrategyDoc();
+        var errBox = document.getElementById("sb-errors");
+        errBox.style.display = "none";
+        var sid = document.getElementById("sb-edit-id").value;
+        var url = sid ? "/api/selector/my-strategies/" + encodeURIComponent(sid) : "/api/selector/my-strategies";
+        var method = sid ? "PUT" : "POST";
+        fetch(url, {
+            method: method,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(doc),
+        })
+        .then(r => r.json())
+        .then(function(data) {
+            if (data && data.errors) {
+                errBox.style.display = "";
+                errBox.innerHTML = "❌ " + data.errors.map(escHtml).join("<br>");
+                return;
+            }
+            if (data && data.error) {
+                errBox.style.display = "";
+                errBox.textContent = "❌ " + data.error;
+                return;
+            }
+            closeStrategyBuilder();
+            loadUserStrategies();
+        })
+        .catch(function(err) {
+            errBox.style.display = "";
+            errBox.textContent = "❌ " + err;
+        });
+    }
+
+    // ── NL Prompt modal ────────────────────────────────────────────────
+    function openStrategyNL() {
+        loadMetricCatalog();
+        document.getElementById("strategy-nl-modal").classList.add("open");
+        document.getElementById("nl-status").style.display = "none";
+        document.getElementById("nl-generate-btn").disabled = false;
+    }
+
+    function closeStrategyNL() {
+        document.getElementById("strategy-nl-modal").classList.remove("open");
+    }
+
+    function compileNL() {
+        var prompt = document.getElementById("nl-prompt").value.trim();
+        if (!prompt) { alert("Please enter a description."); return; }
+        var status = document.getElementById("nl-status");
+        var btn = document.getElementById("nl-generate-btn");
+        status.style.display = "";
+        status.style.color = "#374151";
+        status.textContent = "⏳ Compiling…";
+        btn.disabled = true;
+        fetch("/api/selector/compile-nl", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt: prompt }),
+        })
+        .then(r => r.json())
+        .then(function(data) {
+            btn.disabled = false;
+            if (data.error) {
+                status.style.color = "#b91c1c";
+                status.textContent = "❌ " + data.error;
+                if (data.errors && data.errors.length) {
+                    status.innerHTML += "<br>" + data.errors.map(escHtml).join("<br>");
+                }
+                return;
+            }
+            closeStrategyNL();
+            openStrategyBuilder(data.strategy);
+        })
+        .catch(function(err) {
+            btn.disabled = false;
+            status.style.color = "#b91c1c";
+            status.textContent = "❌ " + err;
+        });
+    }
+
     function runSelector() {
         var marketSel = document.getElementById("selector-market").value;
         var markets = marketSel.split(",");
         var strategies = [];
         document.querySelectorAll(".selector-strat-cb:checked").forEach(function(cb) {
             strategies.push(cb.value);
+        });
+        document.querySelectorAll(".selector-user-strat-cb:checked").forEach(function(cb) {
+            strategies.push("user:" + cb.value);
         });
         var t = I18N[currentLang] || I18N.en;
         if (!strategies.length) {

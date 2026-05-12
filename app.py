@@ -1388,7 +1388,7 @@ def watchlist_remove(symbol: str):
 
 @app.route("/api/selector/strategies", methods=["GET"])
 def selector_strategies():
-    # Public: returns only static strategy metadata, no user data.
+    # Public: returns only static built-in strategy metadata, no user data.
     return jsonify({"strategies": selector_service.list_strategies()})
 
 
@@ -1410,6 +1410,7 @@ def selector_run():
             top_n_a=top_n_a,
             top_n_hk=top_n_hk,
             max_workers=max_workers,
+            user_id=_uid(),
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -1450,6 +1451,159 @@ def selector_add_picks():
             failed.append({"symbol": raw, "error": str(exc)})
     items = trade_storage.get_watchlist(config, user_id=_uid())
     return jsonify({"added": added, "failed": failed, "items": items})
+
+
+# ── AI Stock Selector — Phase 2: user-defined strategies ───────────────
+
+@app.route("/api/selector/metric-catalog", methods=["GET"])
+def selector_metric_catalog():
+    """Public: metric vocabulary + operator list for the Strategy Builder UI."""
+    import user_strategy as us
+    return jsonify({
+        "metrics": us.metric_catalog_for_ui(),
+        "operators": us.operator_catalog_for_ui(),
+        "match_modes": ["AND", "OR_AT_LEAST"],
+    })
+
+
+@app.route("/api/selector/my-strategies", methods=["GET"])
+@login_required
+def selector_my_strategies():
+    config = ToolkitConfig()
+    items = trade_storage.list_user_strategies(config, user_id=_uid())
+    return jsonify({"strategies": items})
+
+
+@app.route("/api/selector/my-strategies", methods=["POST"])
+@login_required
+def selector_my_strategies_create():
+    import user_strategy as us
+    payload = request.get_json(silent=True) or {}
+    errors = us.validate(payload)
+    if errors:
+        return jsonify({"error": "validation failed", "errors": errors}), 400
+    config = ToolkitConfig()
+    created = trade_storage.create_user_strategy(
+        config, payload, user_id=_uid(),
+        source=str(payload.get("source", "form"))[:16],
+    )
+    return jsonify({"strategy": created}), 201
+
+
+@app.route("/api/selector/my-strategies/<sid>", methods=["PUT"])
+@login_required
+def selector_my_strategies_update(sid: str):
+    import user_strategy as us
+    payload = request.get_json(silent=True) or {}
+    errors = us.validate(payload)
+    if errors:
+        return jsonify({"error": "validation failed", "errors": errors}), 400
+    config = ToolkitConfig()
+    updated = trade_storage.update_user_strategy(config, sid, payload, user_id=_uid())
+    if updated is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"strategy": updated})
+
+
+@app.route("/api/selector/my-strategies/<sid>", methods=["DELETE"])
+@login_required
+def selector_my_strategies_delete(sid: str):
+    config = ToolkitConfig()
+    ok = trade_storage.delete_user_strategy(config, sid, user_id=_uid())
+    if not ok:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/selector/validate", methods=["POST"])
+@login_required
+def selector_validate():
+    import user_strategy as us
+    payload = request.get_json(silent=True) or {}
+    errors = us.validate(payload)
+    return jsonify({"ok": not errors, "errors": errors})
+
+
+@app.route("/api/selector/compile-nl", methods=["POST"])
+@login_required
+def selector_compile_nl():
+    """Compile a natural-language prompt into a validated user-strategy schema."""
+    import user_strategy as us
+    import json as _json
+    import re as _re
+
+    payload = request.get_json(silent=True) or {}
+    prompt = (payload.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "prompt required"}), 400
+    if len(prompt) > 2000:
+        return jsonify({"error": "prompt too long (max 2000 chars)"}), 400
+
+    # Build system prompt enumerating the vocabulary.
+    metrics_doc = "\n".join(
+        f"- {m['key']} ({m['type']}): {m['desc_en']} / {m['desc_zh']}"
+        for m in us.metric_catalog_for_ui()
+    )
+    system_prompt = (
+        "You compile Chinese-A-share stock-screening prompts into a strict "
+        "JSON document describing screening rules. ONLY output a single JSON "
+        "object — no markdown, no commentary.\n\n"
+        f"Available metrics (use these keys exactly):\n{metrics_doc}\n\n"
+        "Available operators: >=, <=, >, <, ==, !=, between (value must be "
+        "[lo, hi] for between). For boolean metrics use only == or != with "
+        "true/false.\n\n"
+        "Schema:\n"
+        "{\n"
+        '  "label": "<short Chinese name, <=20 chars>",\n'
+        '  "description": "<one-line summary>",\n'
+        '  "match_mode": "AND" or "OR_AT_LEAST",\n'
+        '  "min_match_rules": <int, only when match_mode=OR_AT_LEAST>,\n'
+        '  "rules": [ {"metric": "...", "op": "...", "value": ...}, ... ]\n'
+        "}\n\n"
+        "Prefer AND mode unless the user explicitly says \"any of\" or \"at least N\". "
+        "Use at most 6 rules. If a request asks for a metric not in the list, choose the closest available metric."
+    )
+
+    def _extract_json(text: str) -> dict | None:
+        m = _re.search(r"\{.*\}", text, _re.DOTALL)
+        if not m:
+            return None
+        try:
+            return _json.loads(m.group(0))
+        except Exception:  # noqa: BLE001
+            return None
+
+    # Up to 2 attempts on schema validation failure
+    last_errors: list[str] = []
+    last_raw: str = ""
+    for attempt in range(2):
+        user_prompt = prompt
+        if last_errors:
+            user_prompt = (
+                f"{prompt}\n\nThe previous attempt failed validation with errors:\n"
+                + "\n".join(f"- {e}" for e in last_errors)
+                + "\nFix all errors and output a valid JSON object only."
+            )
+        try:
+            from llm_service import call_llm as _call_llm
+            raw = _call_llm(system_prompt, user_prompt)
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"error": f"LLM call failed: {exc}"}), 502
+        last_raw = raw or ""
+        doc = _extract_json(last_raw)
+        if doc is None:
+            last_errors = ["LLM did not return a JSON object."]
+            continue
+        errors = us.validate(doc)
+        if not errors:
+            return jsonify({"strategy": doc, "raw_llm_output": last_raw})
+        last_errors = errors
+
+    return jsonify({
+        "error": "LLM output failed validation after retries",
+        "errors": last_errors,
+        "raw_llm_output": last_raw,
+    }), 400
 
 
 start_analysis_scheduler()
