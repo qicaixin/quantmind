@@ -1545,33 +1545,60 @@ def selector_compile_nl():
         for m in us.metric_catalog_for_ui()
     )
     system_prompt = (
-        "You compile Chinese-A-share stock-screening prompts into a strict "
-        "JSON document describing screening rules. ONLY output a single JSON "
-        "object — no markdown, no commentary.\n\n"
+        "You are a JSON compiler. Convert the user's stock-screening prompt "
+        "(may be in Chinese or English) into a single JSON object matching "
+        "the schema below. Output **ONLY the raw JSON object** — no prose, "
+        "no markdown fences, no comments, no preamble. The very first "
+        "character of your reply MUST be `{` and the last MUST be `}`.\n\n"
         f"Available metrics (use these keys exactly):\n{metrics_doc}\n\n"
         "Available operators: >=, <=, >, <, ==, !=, between (value must be "
         "[lo, hi] for between). For boolean metrics use only == or != with "
         "true/false.\n\n"
         "Schema:\n"
         "{\n"
-        '  "label": "<short Chinese name, <=20 chars>",\n'
+        '  "label": "<short name, <=20 chars>",\n'
         '  "description": "<one-line summary>",\n'
         '  "match_mode": "AND" or "OR_AT_LEAST",\n'
         '  "min_match_rules": <int, only when match_mode=OR_AT_LEAST>,\n'
-        '  "rules": [ {"metric": "...", "op": "...", "value": ...}, ... ]\n'
+        '  "rules": [ {"metric": "...", "op": "...", "value": ...}, ... ],\n'
+        '  "enabled": true\n'
         "}\n\n"
-        "Prefer AND mode unless the user explicitly says \"any of\" or \"at least N\". "
-        "Use at most 6 rules. If a request asks for a metric not in the list, choose the closest available metric."
+        "Rules:\n"
+        "- Prefer AND mode unless user says \"any of\" or \"at least N\".\n"
+        "- Use at most 6 rules.\n"
+        "- If a request asks for a metric not in the list, choose the "
+        "closest available metric (e.g. \"breakout new high\" → "
+        "breakout_60d_high=true).\n"
+        "- Numeric values must be JSON numbers (no quotes, no % signs).\n"
+        "- For percentage metrics (price_position_60d, price_position_120d, "
+        "pct_chg_today, pct_chg_5d, rsi_14), use the numeric value directly "
+        "(e.g. 70 means 70%).\n\n"
+        "Example output:\n"
+        '{"label":"放量突破","description":"5日量比放大并突破60日新高",'
+        '"match_mode":"AND","min_match_rules":1,"rules":['
+        '{"metric":"vol_ratio_ma5","op":">=","value":1.5},'
+        '{"metric":"breakout_60d_high","op":"==","value":true}'
+        '],"enabled":true}'
     )
 
     def _extract_json(text: str) -> dict | None:
-        m = _re.search(r"\{.*\}", text, _re.DOTALL)
+        if not text:
+            return None
+        # Strip markdown code fences if present
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = _re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = _re.sub(r"\s*```\s*$", "", cleaned)
+        m = _re.search(r"\{.*\}", cleaned, _re.DOTALL)
         if not m:
             return None
         try:
             return _json.loads(m.group(0))
         except Exception:  # noqa: BLE001
             return None
+
+    config = ToolkitConfig()
+    user_llm_cfg = trade_storage.get_user_llm_config(config, _uid())
 
     # Up to 2 attempts on schema validation failure
     last_errors: list[str] = []
@@ -1586,13 +1613,19 @@ def selector_compile_nl():
             )
         try:
             from llm_service import call_llm as _call_llm
-            raw = _call_llm(system_prompt, user_prompt)
+            raw = _call_llm(system_prompt, user_prompt, config_override=user_llm_cfg or None)
         except Exception as exc:  # noqa: BLE001
             return jsonify({"error": f"LLM call failed: {exc}"}), 502
         last_raw = raw or ""
+        # Detect error/warning responses from llm_service (start with ❌ or ⚠️)
+        if last_raw.startswith(("❌", "⚠️")):
+            return jsonify({"error": last_raw}), 502
         doc = _extract_json(last_raw)
         if doc is None:
-            last_errors = ["LLM did not return a JSON object."]
+            last_errors = [
+                "LLM did not return a JSON object. Try a clearer description, "
+                "or open Strategy Builder manually."
+            ]
             continue
         errors = us.validate(doc)
         if not errors:

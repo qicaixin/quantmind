@@ -3393,9 +3393,14 @@
             btn.disabled = false;
             if (data.error) {
                 status.style.color = "#b91c1c";
-                status.textContent = "❌ " + data.error;
+                status.innerHTML = "❌ " + escHtml(data.error);
                 if (data.errors && data.errors.length) {
                     status.innerHTML += "<br>" + data.errors.map(escHtml).join("<br>");
+                }
+                if (data.raw_llm_output) {
+                    status.innerHTML += '<details style="margin-top:6px;"><summary style="cursor:pointer;color:#6b7280;">Raw LLM output</summary>'
+                        + '<pre style="background:#f3f4f6;padding:6px;border-radius:4px;max-height:200px;overflow:auto;font-size:11px;white-space:pre-wrap;">'
+                        + escHtml(data.raw_llm_output) + '</pre></details>';
                 }
                 return;
             }
