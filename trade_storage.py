@@ -4,7 +4,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -156,6 +156,54 @@ def ensure_storage(config: ToolkitConfig) -> None:
                 details_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS decision_events (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL DEFAULT 1,
+                symbol TEXT NOT NULL,
+                source TEXT NOT NULL,
+                signal TEXT NOT NULL,
+                decision_time TEXT NOT NULL,
+                decision_price REAL,
+                confidence TEXT,
+                analysis_id TEXT,
+                ta_job_id TEXT,
+                rationale_json TEXT NOT NULL DEFAULT '[]',
+                raw_payload_json TEXT NOT NULL DEFAULT '{}',
+                dedupe_key TEXT UNIQUE,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS decision_evaluations (
+                event_id TEXT NOT NULL,
+                horizon_days INTEGER NOT NULL,
+                entry_price REAL NOT NULL,
+                exit_price REAL NOT NULL,
+                return_pct REAL NOT NULL,
+                max_drawdown_pct REAL NOT NULL,
+                max_runup_pct REAL NOT NULL,
+                is_win INTEGER NOT NULL,
+                evaluated_at TEXT NOT NULL,
+                PRIMARY KEY (event_id, horizon_days),
+                FOREIGN KEY (event_id) REFERENCES decision_events(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS analysis_schedules (
+                user_id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                symbols_csv TEXT NOT NULL DEFAULT '',
+                types_json TEXT NOT NULL DEFAULT '[]',
+                paper_trade_enabled INTEGER NOT NULL DEFAULT 0,
+                interval_minutes INTEGER NOT NULL DEFAULT 240,
+                cron_expr TEXT NOT NULL DEFAULT '0 */4 * * *',
+                lang TEXT NOT NULL DEFAULT 'zh',
+                last_run TEXT,
+                next_run TEXT,
+                last_error TEXT,
+                updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
             """
@@ -466,6 +514,8 @@ def _migrate_schema(config: ToolkitConfig) -> None:
             ("ta_analyses", "user_id", "INTEGER NOT NULL DEFAULT 1"),
             ("users", "llm_config_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("users", "broker_config_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("analysis_schedules", "paper_trade_enabled", "INTEGER NOT NULL DEFAULT 0"),
+            ("analysis_schedules", "cron_expr", "TEXT NOT NULL DEFAULT '0 */4 * * *'"),
         ]
         for table, column, col_type in migrations:
             try:
@@ -473,6 +523,432 @@ def _migrate_schema(config: ToolkitConfig) -> None:
             except sqlite3.OperationalError:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
         conn.commit()
+
+
+def _canonical_signal(value: str | None) -> str:
+    signal = (value or "HOLD").upper().strip()
+    if signal in ("STRONG_BUY", "LEAN_BUY", "OVERWEIGHT"):
+        return "BUY"
+    if signal in ("STRONG_SELL", "LEAN_SELL", "UNDERWEIGHT"):
+        return "SELL"
+    if signal in ("BUY", "SELL", "HOLD"):
+        return signal
+    if "BUY" in signal or "买" in signal:
+        return "BUY"
+    if "SELL" in signal or "卖" in signal:
+        return "SELL"
+    return "HOLD"
+
+
+def record_decision_event(
+    config: ToolkitConfig,
+    *,
+    user_id: int,
+    symbol: str,
+    source: str,
+    signal: str,
+    decision_time: str | None = None,
+    decision_price: float | None = None,
+    confidence: str | None = None,
+    analysis_id: str | None = None,
+    ta_job_id: str | None = None,
+    rationale: list | dict | str | None = None,
+    raw_payload: dict | None = None,
+    dedupe_key: str | None = None,
+) -> dict:
+    ensure_storage(config)
+    event_id = uuid.uuid4().hex
+    created_at = datetime.now().isoformat(timespec="seconds")
+    event_time = decision_time or created_at
+    payload = raw_payload or {}
+    if rationale is None:
+        rationale_payload: list | dict | str = []
+    else:
+        rationale_payload = rationale
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO decision_events (
+                id, user_id, symbol, source, signal, decision_time, decision_price,
+                confidence, analysis_id, ta_job_id, rationale_json, raw_payload_json,
+                dedupe_key, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                user_id,
+                symbol,
+                source,
+                _canonical_signal(signal),
+                event_time,
+                float(decision_price) if decision_price is not None else None,
+                confidence,
+                analysis_id,
+                ta_job_id,
+                json.dumps(rationale_payload, ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=False),
+                dedupe_key,
+                created_at,
+            ),
+        )
+        if dedupe_key:
+            row = conn.execute(
+                "SELECT * FROM decision_events WHERE user_id = ? AND dedupe_key = ?",
+                (user_id, dedupe_key),
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT * FROM decision_events WHERE id = ?", (event_id,)).fetchone()
+        conn.commit()
+    return _decision_event_row_to_dict(row)
+
+
+def list_decision_events(
+    config: ToolkitConfig,
+    *,
+    user_id: int,
+    symbol: str | None = None,
+    source: str | None = None,
+    limit: int = 300,
+) -> list[dict]:
+    ensure_storage(config)
+    clauses = ["user_id = ?"]
+    params: list = [user_id]
+    if symbol:
+        clauses.append("symbol = ?")
+        params.append(symbol)
+    if source:
+        clauses.append("source = ?")
+        params.append(source)
+    params.append(limit)
+    with closing(_connect(config)) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM decision_events
+            WHERE {' AND '.join(clauses)}
+            ORDER BY decision_time DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    return [_decision_event_row_to_dict(row) for row in rows]
+
+
+def upsert_decision_evaluation(
+    config: ToolkitConfig,
+    *,
+    event_id: str,
+    horizon_days: int,
+    entry_price: float,
+    exit_price: float,
+    return_pct: float,
+    max_drawdown_pct: float,
+    max_runup_pct: float,
+    is_win: bool,
+) -> None:
+    ensure_storage(config)
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            """
+            INSERT INTO decision_evaluations (
+                event_id, horizon_days, entry_price, exit_price, return_pct,
+                max_drawdown_pct, max_runup_pct, is_win, evaluated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_id, horizon_days) DO UPDATE SET
+                entry_price = excluded.entry_price,
+                exit_price = excluded.exit_price,
+                return_pct = excluded.return_pct,
+                max_drawdown_pct = excluded.max_drawdown_pct,
+                max_runup_pct = excluded.max_runup_pct,
+                is_win = excluded.is_win,
+                evaluated_at = excluded.evaluated_at
+            """,
+            (
+                event_id,
+                horizon_days,
+                entry_price,
+                exit_price,
+                return_pct,
+                max_drawdown_pct,
+                max_runup_pct,
+                1 if is_win else 0,
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+
+
+def _decision_event_row_to_dict(row: sqlite3.Row | None) -> dict:
+    if row is None:
+        return {}
+    try:
+        rationale = json.loads(row["rationale_json"] or "[]")
+    except Exception:
+        rationale = []
+    try:
+        raw_payload = json.loads(row["raw_payload_json"] or "{}")
+    except Exception:
+        raw_payload = {}
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "symbol": row["symbol"],
+        "source": row["source"],
+        "signal": row["signal"],
+        "decision_time": row["decision_time"],
+        "decision_price": row["decision_price"],
+        "confidence": row["confidence"],
+        "analysis_id": row["analysis_id"],
+        "ta_job_id": row["ta_job_id"],
+        "rationale": rationale,
+        "raw_payload": raw_payload,
+        "dedupe_key": row["dedupe_key"],
+        "created_at": row["created_at"],
+    }
+
+
+def get_analysis_schedule(config: ToolkitConfig, user_id: int) -> dict:
+    ensure_storage(config)
+    with closing(_connect(config)) as conn:
+        row = conn.execute(
+            "SELECT * FROM analysis_schedules WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    if not row:
+        return {
+            "enabled": False,
+            "symbols": [],
+            "types": ["kronos"],
+            "paper_trade_enabled": False,
+            "interval_minutes": 240,
+            "cron_expr": "0 */4 * * *",
+            "lang": "zh",
+            "last_run": None,
+            "next_run": None,
+            "last_error": None,
+        }
+    return _schedule_row_to_dict(row)
+
+
+def validate_cron_expr(expr: str) -> str:
+    expr = " ".join((expr or "").strip().split())
+    if not expr:
+        raise ValueError("Cron expression is required")
+    parts = expr.split(" ")
+    if len(parts) != 5:
+        raise ValueError("Cron expression must have 5 fields: minute hour day month weekday")
+    ranges = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
+    for field, (min_value, max_value) in zip(parts, ranges):
+        _parse_cron_field(field, min_value, max_value)
+    return expr
+
+
+def _parse_cron_field(field: str, min_value: int, max_value: int) -> set[int]:
+    values: set[int] = set()
+    for item in field.split(","):
+        item = item.strip()
+        if not item:
+            raise ValueError(f"Invalid cron field: {field}")
+        base = item
+        step = 1
+        if "/" in item:
+            base, step_text = item.split("/", 1)
+            if not step_text.isdigit() or int(step_text) <= 0:
+                raise ValueError(f"Invalid cron step: {item}")
+            step = int(step_text)
+        if base == "*":
+            start, end = min_value, max_value
+        elif "-" in base:
+            start_text, end_text = base.split("-", 1)
+            if not start_text.isdigit() or not end_text.isdigit():
+                raise ValueError(f"Invalid cron range: {item}")
+            start, end = int(start_text), int(end_text)
+        elif base.isdigit():
+            start = end = int(base)
+        else:
+            raise ValueError(f"Invalid cron field: {item}")
+        if start < min_value or end > max_value or start > end:
+            raise ValueError(f"Cron value out of range: {item}")
+        values.update(range(start, end + 1, step))
+    if max_value == 7 and 7 in values:
+        values.add(0)
+    return values
+
+
+def _cron_field_is_wildcard(field: str) -> bool:
+    return field == "*" or field.startswith("*/")
+
+
+def _cron_matches(expr: str, dt: datetime) -> bool:
+    minute, hour, dom, month, dow = expr.split()
+    if dt.minute not in _parse_cron_field(minute, 0, 59):
+        return False
+    if dt.hour not in _parse_cron_field(hour, 0, 23):
+        return False
+    if dt.month not in _parse_cron_field(month, 1, 12):
+        return False
+    dom_match = dt.day in _parse_cron_field(dom, 1, 31)
+    cron_dow = (dt.weekday() + 1) % 7
+    dow_match = cron_dow in _parse_cron_field(dow, 0, 7)
+    if not _cron_field_is_wildcard(dom) and not _cron_field_is_wildcard(dow):
+        return dom_match or dow_match
+    return dom_match and dow_match
+
+
+def next_cron_run(expr: str, after: datetime | None = None) -> datetime:
+    expr = validate_cron_expr(expr)
+    cursor = (after or datetime.now()).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    max_checks = 366 * 24 * 60
+    for _ in range(max_checks):
+        if _cron_matches(expr, cursor):
+            return cursor
+        cursor += timedelta(minutes=1)
+    raise ValueError("Unable to find next run within one year for cron expression")
+
+
+def save_analysis_schedule(
+    config: ToolkitConfig,
+    user_id: int,
+    *,
+    enabled: bool,
+    symbols: list[str],
+    analysis_types: list[str],
+    interval_minutes: int,
+    cron_expr: str = "0 */4 * * *",
+    paper_trade_enabled: bool = False,
+    lang: str = "zh",
+) -> dict:
+    ensure_storage(config)
+    now = datetime.now()
+    cron_expr = validate_cron_expr(cron_expr)
+    next_run = next_cron_run(cron_expr, now).isoformat(timespec="seconds") if enabled else None
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            """
+            INSERT INTO analysis_schedules (
+                user_id, enabled, symbols_csv, types_json, paper_trade_enabled,
+                interval_minutes, cron_expr, lang, next_run, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                enabled = excluded.enabled,
+                symbols_csv = excluded.symbols_csv,
+                types_json = excluded.types_json,
+                paper_trade_enabled = excluded.paper_trade_enabled,
+                interval_minutes = excluded.interval_minutes,
+                cron_expr = excluded.cron_expr,
+                lang = excluded.lang,
+                next_run = excluded.next_run,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_id,
+                1 if enabled else 0,
+                ",".join(symbols),
+                json.dumps(analysis_types, ensure_ascii=False),
+                1 if paper_trade_enabled else 0,
+                interval_minutes,
+                cron_expr,
+                lang,
+                next_run,
+                now.isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+    return get_analysis_schedule(config, user_id)
+
+
+def set_analysis_schedule_enabled(config: ToolkitConfig, user_id: int, enabled: bool) -> dict:
+    ensure_storage(config)
+    schedule = get_analysis_schedule(config, user_id)
+    if not schedule.get("symbols") or not schedule.get("types"):
+        raise ValueError("Schedule has no symbols or analysis types configured")
+    cron_expr = validate_cron_expr(schedule.get("cron_expr") or "0 */4 * * *")
+    next_run = next_cron_run(cron_expr).isoformat(timespec="seconds") if enabled else None
+    now = datetime.now().isoformat(timespec="seconds")
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            """
+            UPDATE analysis_schedules
+            SET enabled = ?, next_run = ?, updated_at = ?
+            WHERE user_id = ?
+            """,
+            (1 if enabled else 0, next_run, now, user_id),
+        )
+        conn.commit()
+    return get_analysis_schedule(config, user_id)
+
+
+def list_due_analysis_schedules(config: ToolkitConfig, now: datetime | None = None) -> list[dict]:
+    ensure_storage(config)
+    now_text = (now or datetime.now()).isoformat(timespec="seconds")
+    with closing(_connect(config)) as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM analysis_schedules
+            WHERE enabled = 1
+              AND symbols_csv != ''
+              AND types_json != '[]'
+              AND (next_run IS NULL OR next_run <= ?)
+            ORDER BY COALESCE(next_run, updated_at)
+            """,
+            (now_text,),
+        ).fetchall()
+    return [_schedule_row_to_dict(row) for row in rows]
+
+
+def mark_analysis_schedule_run(
+    config: ToolkitConfig,
+    user_id: int,
+    *,
+    interval_minutes: int,
+    cron_expr: str | None = None,
+    error: str | None = None,
+) -> None:
+    ensure_storage(config)
+    now = datetime.now()
+    if cron_expr:
+        next_run = next_cron_run(cron_expr, now)
+    else:
+        next_run = now + timedelta(minutes=max(15, int(interval_minutes)))
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            """
+            UPDATE analysis_schedules
+            SET last_run = ?, next_run = ?, last_error = ?, updated_at = ?
+            WHERE user_id = ?
+            """,
+            (
+                now.isoformat(timespec="seconds"),
+                next_run.isoformat(timespec="seconds"),
+                error,
+                now.isoformat(timespec="seconds"),
+                user_id,
+            ),
+        )
+        conn.commit()
+
+
+def _schedule_row_to_dict(row: sqlite3.Row) -> dict:
+    try:
+        analysis_types = json.loads(row["types_json"] or "[]")
+    except Exception:
+        analysis_types = []
+    symbols = [item.strip() for item in (row["symbols_csv"] or "").split(",") if item.strip()]
+    return {
+        "user_id": row["user_id"],
+        "enabled": bool(row["enabled"]),
+        "symbols": symbols,
+        "types": analysis_types,
+        "paper_trade_enabled": bool(row["paper_trade_enabled"]),
+        "interval_minutes": int(row["interval_minutes"]),
+        "cron_expr": row["cron_expr"],
+        "lang": row["lang"],
+        "last_run": row["last_run"],
+        "next_run": row["next_run"],
+        "last_error": row["last_error"],
+        "updated_at": row["updated_at"],
+    }
 
 
 def _state_path(config: ToolkitConfig, mode: str) -> Path:
@@ -833,7 +1309,32 @@ def update_ta_job(
                 job_id,
             ),
         )
+        job_row = conn.execute(
+            "SELECT job_id, user_id, symbol, trade_date, decision, reports_json, completed_at "
+            "FROM ta_analyses WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
         conn.commit()
+    if status == "done" and job_row and job_row["decision"]:
+        reports = {}
+        if job_row["reports_json"]:
+            try:
+                reports = json.loads(job_row["reports_json"])
+            except Exception:
+                reports = {}
+        record_decision_event(
+            config,
+            user_id=int(job_row["user_id"]),
+            symbol=job_row["symbol"],
+            source="trade_agent",
+            signal=job_row["decision"],
+            decision_time=job_row["completed_at"] or datetime.now().isoformat(timespec="seconds"),
+            confidence=None,
+            ta_job_id=job_row["job_id"],
+            rationale=reports.get("final_decision") or reports.get("trader_plan") or [],
+            raw_payload={"decision": job_row["decision"], "trade_date": job_row["trade_date"], "reports": reports},
+            dedupe_key=f"trade_agent:{job_row['job_id']}",
+        )
 
 
 def load_ta_job(config: ToolkitConfig, job_id: str) -> dict | None:
@@ -847,6 +1348,25 @@ def load_ta_job(config: ToolkitConfig, job_id: str) -> dict | None:
     if not row:
         return None
     return _ta_row_to_dict(row)
+
+
+def fail_running_ta_jobs(config: ToolkitConfig, error: str) -> int:
+    """Mark running TradingAgents jobs as failed after app restart/deploy."""
+    ensure_storage(config)
+    completed_at = datetime.now().isoformat(timespec="seconds")
+    with closing(_connect(config)) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE ta_analyses
+            SET status = 'failed',
+                error = ?,
+                completed_at = ?
+            WHERE status = 'running'
+            """,
+            (error, completed_at),
+        )
+        conn.commit()
+        return cursor.rowcount
 
 
 def get_latest_ta_analysis(config: ToolkitConfig, symbol: str, *, user_id: int = DEFAULT_USER_ID) -> dict | None:
