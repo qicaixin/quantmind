@@ -3046,8 +3046,14 @@
         box.style.display = "";
         document.getElementById("selector-run-btn").disabled = false;
 
+        var warnHtml = "";
+        if (result.warnings && result.warnings.length) {
+            warnHtml = '<div style="background:#fef3c7;border:1px solid #fcd34d;color:#92400e;border-radius:6px;padding:8px 10px;font-size:12px;margin-bottom:10px;">'
+                     + '⚠️ ' + result.warnings.map(escHtml).join('<br>') + '</div>';
+        }
+
         if (!selectorPicks.length) {
-            box.innerHTML = '<div style="padding:14px;text-align:center;color:#6b7280;">'
+            box.innerHTML = warnHtml + '<div style="padding:14px;text-align:center;color:#6b7280;">'
                 + (t.selector_no_picks || "No candidates found for today's scan.")
                 + '</div>';
             document.getElementById("selector-add-all-btn").style.display = "none";
@@ -3064,6 +3070,7 @@
                  + (t.selector_found || "Found") + ' ' + selectorPicks.length
                  + ' · ' + (t.selector_trade_date || "Trade date") + ': ' + escHtml(result.trade_date || "")
                  + ' · ' + (result.duration_sec || 0) + 's</div>';
+        html = warnHtml + html;
         selectorPicks.forEach(function(p, i) {
             var stratLabels = (p.strategies || []).map(function(k) { return labelMap[k] || k; }).join(" · ");
             var pctColor = (p.pct_chg || 0) >= 0 ? "#dc2626" : "#16a34a";

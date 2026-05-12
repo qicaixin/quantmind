@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import random
 import threading
 import time
 import traceback
@@ -45,10 +47,82 @@ SKY_VOL_WINDOW = 120         # bars used for "近半年最大量" comparison
 SKY_VOL_RATIO = 0.95         # today's vol must be >= ratio * window max
 BOARD_LIMIT = 4              # 连板最高关注到 4 板
 POSITION_HIGH_PCT = 60.0     # > this % above MA60 ⇒ "高位" (excluded unless 连板龙头)
-DEFAULT_MAX_WORKERS = 6      # AKShare-friendly default
+
+# Cloud / HF Spaces tend to be rate-limited by East-Money / Sina, so we
+# default to a much lower concurrency and add per-request retries when we
+# detect we're running on Hugging Face Spaces.
+_ON_HF = bool(os.environ.get("SPACE_ID") or os.environ.get("SPACE_HOST"))
+DEFAULT_MAX_WORKERS = 3 if _ON_HF else 6
+RETRY_ATTEMPTS = 4 if _ON_HF else 2
+RETRY_BASE_DELAY = 0.4       # seconds; exponential backoff with jitter
+
 DEFAULT_TOP_ACTIVE_A = 400
 DEFAULT_TOP_ACTIVE_HK = 150
 DEFAULT_HISTORY_DAYS = 210
+
+
+# ── Browser-like default headers for AKShare's underlying requests calls ─
+# East-Money and Sina close the connection (RemoteDisconnected) on requests
+# that look automated, especially from foreign cloud IPs. We monkey-patch
+# requests' default headers ONCE at import time so AKShare gets a realistic
+# User-Agent and Referer without having to pass them at every call site.
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Referer": "https://quote.eastmoney.com/",
+    "Connection": "keep-alive",
+}
+
+
+def _patch_requests_defaults_once() -> None:
+    """Inject browser headers into all `requests` calls that don't override them."""
+    try:
+        import requests
+    except ImportError:
+        return
+    if getattr(requests, "_qm_selector_patched", False):
+        return
+
+    _orig_request = requests.Session.request
+
+    def _patched_request(self, method, url, **kwargs):  # type: ignore[no-untyped-def]
+        headers = dict(_BROWSER_HEADERS)
+        if kwargs.get("headers"):
+            headers.update(kwargs["headers"])
+        kwargs["headers"] = headers
+        # Be defensive about hangs from servers that accept the connection
+        # then never reply.
+        kwargs.setdefault("timeout", 15)
+        return _orig_request(self, method, url, **kwargs)
+
+    requests.Session.request = _patched_request  # type: ignore[assignment]
+    requests._qm_selector_patched = True  # type: ignore[attr-defined]
+    logger.info("Patched requests.Session.request with browser headers + 15s default timeout")
+
+
+_patch_requests_defaults_once()
+
+
+def _retry(fn: Callable[[], Any], *, attempts: int = RETRY_ATTEMPTS,
+           base_delay: float = RETRY_BASE_DELAY) -> Any:
+    """Retry a callable on transient network errors with exponential backoff."""
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if i == attempts - 1:
+                break
+            sleep = base_delay * (2 ** i) + random.uniform(0, base_delay)
+            time.sleep(sleep)
+    if last_exc is not None:
+        raise last_exc
 
 
 # ── Strategy definitions (UI metadata) ─────────────────────────────────
@@ -179,20 +253,26 @@ def _ak():
 def _fetch_hist_a(code: str, start: str, end: str) -> tuple[str, pd.DataFrame | None]:
     try:
         ak = _ak()
-        hist = ak.stock_zh_a_hist(symbol=code, period="daily",
-                                  start_date=start, end_date=end, adjust="qfq")
+        hist = _retry(lambda: ak.stock_zh_a_hist(
+            symbol=code, period="daily",
+            start_date=start, end_date=end, adjust="qfq",
+        ))
         return code, hist
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("history A fetch failed for %s: %s", code, exc)
         return code, None
 
 
 def _fetch_hist_hk(code: str, start: str, end: str) -> tuple[str, pd.DataFrame | None]:
     try:
         ak = _ak()
-        hist = ak.stock_hk_hist(symbol=code, period="daily",
-                                start_date=start, end_date=end, adjust="qfq")
+        hist = _retry(lambda: ak.stock_hk_hist(
+            symbol=code, period="daily",
+            start_date=start, end_date=end, adjust="qfq",
+        ))
         return code, hist
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("history HK fetch failed for %s: %s", code, exc)
         return code, None
 
 
@@ -350,20 +430,21 @@ def _analyze_hk(code: str, name: str, price: float, vol_today: float,
 # ── Universe scan ──────────────────────────────────────────────────────
 
 def _scan_market(market: str, wanted: set[str], top_n: int, max_workers: int,
-                 progress: Callable[[float, str], None]) -> list[dict[str, Any]]:
+                 progress: Callable[[float, str], None]
+                 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     ak = _ak()
     start = _start_date()
     end = _recent_trading_date()
 
     progress(0.05, f"Loading {market} spot snapshot…")
     if market == "A":
-        df = ak.stock_zh_a_spot_em()
+        df = _retry(lambda: ak.stock_zh_a_spot_em())
         df = df[~df["名称"].astype(str).str.contains("ST|退|N |C ", na=False)]
         df = df[~df["代码"].astype(str).str.startswith(("8", "4"))]  # exclude BJ
         fetch = _fetch_hist_a
         analyze = _analyze_a
     elif market == "HK":
-        df = ak.stock_hk_spot_em()
+        df = _retry(lambda: ak.stock_hk_spot_em())
         df = df[~df["名称"].astype(str).str.contains("退", na=False)]
         fetch = _fetch_hist_hk
         analyze = _analyze_hk
@@ -385,21 +466,32 @@ def _scan_market(market: str, wanted: set[str], top_n: int, max_workers: int,
 
     total = len(todo)
     if total == 0:
-        return []
+        return [], {"market": market, "scanned": 0, "fetched_ok": 0, "matched": 0}
 
     progress(0.10, f"Fetching history for {total} {market} symbols…")
     hist_map: dict[str, pd.DataFrame | None] = {}
     done = 0
+    fetched_ok = 0
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(fetch, s[0], start, end): s for s in todo}
         for fut in as_completed(futures):
             code, hist = fut.result()
             hist_map[code] = hist
             done += 1
+            if hist is not None:
+                fetched_ok += 1
             if done % 25 == 0 or done == total:
                 # 10..70% of total progress allocated to history fetch
                 progress(0.10 + 0.60 * done / total,
-                         f"Fetched {done}/{total} {market} histories…")
+                         f"Fetched {done}/{total} {market} histories ({fetched_ok} ok)…")
+
+    fail_rate = 1.0 - (fetched_ok / total)
+    if fail_rate >= 0.5:
+        logger.warning(
+            "Selector %s scan: %d/%d history fetches failed (%.0f%%). "
+            "Likely upstream rate-limit / IP block.",
+            market, total - fetched_ok, total, fail_rate * 100,
+        )
 
     progress(0.75, f"Analyzing {market} candidates…")
     results: list[dict[str, Any]] = []
@@ -411,7 +503,13 @@ def _scan_market(market: str, wanted: set[str], top_n: int, max_workers: int,
         if res:
             results.append(res)
     progress(0.95, f"{market} scan found {len(results)} candidates.")
-    return results
+    stats = {
+        "market": market,
+        "scanned": total,
+        "fetched_ok": fetched_ok,
+        "matched": len(results),
+    }
+    return results, stats
 
 
 # ── Async job registry ─────────────────────────────────────────────────
@@ -473,6 +571,7 @@ def _run_job(job_id: str, config: ToolkitConfig, markets: list[str],
 
     try:
         results: list[dict[str, Any]] = []
+        scan_stats: list[dict[str, int]] = []
         n_markets = len(markets)
         for idx, market in enumerate(markets):
             offset = idx / max(n_markets, 1)
@@ -482,14 +581,29 @@ def _run_job(job_id: str, config: ToolkitConfig, markets: list[str],
                 progress(_o + _s * p, msg)
 
             top_n = top_n_a if market == "A" else top_n_hk
-            picks = _scan_market(market, wanted, top_n, max_workers, sub_progress)
+            picks, stats = _scan_market(market, wanted, top_n, max_workers, sub_progress)
             results.extend(picks)
+            scan_stats.append(stats)
 
         # Stable sort: limit-up first, then larger turnover
         results.sort(
             key=lambda r: (0 if r["trend"] == "涨停" else 1, -r["amount_yi"])
         )
         finished_at = time.time()
+
+        # Aggregate fetch health to surface upstream rate-limiting
+        total_scanned = sum(s["scanned"] for s in scan_stats)
+        total_ok = sum(s["fetched_ok"] for s in scan_stats)
+        fetch_success_rate = (total_ok / total_scanned) if total_scanned else 1.0
+
+        warnings: list[str] = []
+        if total_scanned > 0 and fetch_success_rate < 0.5:
+            warnings.append(
+                f"Only {total_ok}/{total_scanned} history fetches succeeded "
+                f"({fetch_success_rate:.0%}). Upstream data source likely "
+                f"rate-limited this server's IP. Picks may be incomplete."
+            )
+
         payload = {
             "job_id": job_id,
             "markets": markets,
@@ -500,6 +614,9 @@ def _run_job(job_id: str, config: ToolkitConfig, markets: list[str],
             "finished_at": finished_at,
             "duration_sec": round(finished_at - started_at, 2),
             "trade_date": _recent_trading_date(),
+            "scan_stats": scan_stats,
+            "fetch_success_rate": round(fetch_success_rate, 3),
+            "warnings": warnings,
             "picks": results,
         }
         saved = _save_run(config, payload)
