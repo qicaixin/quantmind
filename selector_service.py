@@ -250,17 +250,48 @@ def _ak():
         raise RuntimeError("akshare is not installed in this environment.") from exc
 
 
+def _normalize_hist_tx(df: pd.DataFrame) -> pd.DataFrame:
+    """Tencent's stock_zh_a_hist_tx returns columns: date, open, close, high,
+    low, amount(volume in 手). Translate to the EM Chinese-column schema the
+    analyzer expects."""
+    if df is None or df.empty:
+        return df
+    rename = {
+        "date": "日期", "open": "开盘", "close": "收盘",
+        "high": "最高", "low": "最低", "amount": "成交量",
+    }
+    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    if "成交额" not in df.columns and {"成交量", "收盘"}.issubset(df.columns):
+        # rough proxy: amount ≈ volume(手)*100 * close
+        df["成交额"] = (
+            pd.to_numeric(df["成交量"], errors="coerce").fillna(0) * 100
+            * pd.to_numeric(df["收盘"], errors="coerce").fillna(0)
+        )
+    return df
+
+
 def _fetch_hist_a(code: str, start: str, end: str) -> tuple[str, pd.DataFrame | None]:
+    ak = _ak()
+    # 1) East-Money (preferred — has 成交额 column natively)
     try:
-        ak = _ak()
         hist = _retry(lambda: ak.stock_zh_a_hist(
             symbol=code, period="daily",
             start_date=start, end_date=end, adjust="qfq",
         ))
-        return code, hist
+        if hist is not None and not hist.empty:
+            return code, hist
     except Exception as exc:  # noqa: BLE001
-        logger.debug("history A fetch failed for %s: %s", code, exc)
-        return code, None
+        logger.debug("EM history fetch failed for %s: %s", code, exc)
+    # 2) Tencent fallback (different host: web.ifzq.gtimg.cn)
+    try:
+        hist_tx = _retry(lambda: ak.stock_zh_a_hist_tx(
+            symbol=("sh" if code.startswith(("6", "9")) else "sz") + code,
+            start_date=start, end_date=end, adjust="qfq",
+        ))
+        return code, _normalize_hist_tx(hist_tx)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Tencent history fallback failed for %s: %s", code, exc)
+    return code, None
 
 
 def _fetch_hist_hk(code: str, start: str, end: str) -> tuple[str, pd.DataFrame | None]:
@@ -427,6 +458,68 @@ def _analyze_hk(code: str, name: str, price: float, vol_today: float,
     }
 
 
+def _get_a_spot() -> pd.DataFrame:
+    """Fetch A-share spot snapshot, falling back across providers when the
+    HF datacenter IP is blocked by one of them.
+
+    Returns a DataFrame with EM-style Chinese columns: 代码 名称 最新价
+    成交量 成交额 涨跌幅
+    """
+    ak = _ak()
+    errors: list[str] = []
+
+    # 1) East-Money aggregate (preferred — fastest, fewest calls)
+    try:
+        df = _retry(lambda: ak.stock_zh_a_spot_em())
+        if df is not None and not df.empty:
+            logger.info("A spot via stock_zh_a_spot_em: %d rows", len(df))
+            return df
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"em_aggregate: {exc}")
+        logger.warning("stock_zh_a_spot_em failed: %s", exc)
+
+    # 2) Sina aggregate (different host: hq.sinajs.cn)
+    try:
+        df = _retry(lambda: ak.stock_zh_a_spot())
+        if df is not None and not df.empty:
+            # Sina returns code WITHOUT prefix in 代码 (akshare strips it),
+            # but column names align with EM. Normalise just in case.
+            if "代码" in df.columns:
+                df["代码"] = df["代码"].astype(str).str.replace(
+                    r"^(sh|sz|bj)", "", regex=True
+                )
+            # Sina's column for amount is also 成交额 (in 元). Volume column
+            # may be 成交量 (in 股). Both compatible with EM analyzer.
+            logger.info("A spot via stock_zh_a_spot (Sina): %d rows", len(df))
+            return df
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"sina_aggregate: {exc}")
+        logger.warning("stock_zh_a_spot (Sina) failed: %s", exc)
+
+    # 3) East-Money per-board (sometimes board endpoints work when aggregate
+    #    is rate-limited). Combine SH + SZ.
+    try:
+        parts = []
+        for fn_name in ("stock_sh_a_spot_em", "stock_sz_a_spot_em"):
+            try:
+                fn = getattr(ak, fn_name)
+                parts.append(_retry(fn))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{fn_name}: {exc}")
+        parts = [p for p in parts if p is not None and not p.empty]
+        if parts:
+            df = pd.concat(parts, ignore_index=True)
+            logger.info("A spot via per-board EM: %d rows", len(df))
+            return df
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"em_per_board: {exc}")
+
+    raise RuntimeError(
+        "All A-share spot data sources failed. Tried: "
+        + " | ".join(errors[:5])
+    )
+
+
 # ── Universe scan ──────────────────────────────────────────────────────
 
 def _scan_market(market: str, wanted: set[str], top_n: int, max_workers: int,
@@ -438,7 +531,7 @@ def _scan_market(market: str, wanted: set[str], top_n: int, max_workers: int,
 
     progress(0.05, f"Loading {market} spot snapshot…")
     if market == "A":
-        df = _retry(lambda: ak.stock_zh_a_spot_em())
+        df = _get_a_spot()
         df = df[~df["名称"].astype(str).str.contains("ST|退|N |C ", na=False)]
         df = df[~df["代码"].astype(str).str.startswith(("8", "4"))]  # exclude BJ
         fetch = _fetch_hist_a
@@ -451,7 +544,13 @@ def _scan_market(market: str, wanted: set[str], top_n: int, max_workers: int,
     else:
         raise ValueError(f"Unknown market: {market}")
 
-    df = df.sort_values("成交额", ascending=False).head(top_n).copy()
+    if "成交额" not in df.columns:
+        # Sina sometimes uses different column names; fallback to volume
+        sort_col = "成交量" if "成交量" in df.columns else df.columns[0]
+    else:
+        sort_col = "成交额"
+    df[sort_col] = pd.to_numeric(df[sort_col], errors="coerce").fillna(0)
+    df = df.sort_values(sort_col, ascending=False).head(top_n).copy()
 
     todo: list[tuple[str, str, float, float, float, float]] = []
     for _, row in df.iterrows():
