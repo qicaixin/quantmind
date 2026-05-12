@@ -2945,7 +2945,7 @@
 
     function renderSelectorStrategyList() {
         var box = document.getElementById("selector-strategy-list");
-        var t = i18n[currentLang] || i18n.en;
+        var t = I18N[currentLang] || I18N.en;
         if (!selectorStrategies.length) {
             box.innerHTML = '<div style="color:#6b7280;font-size:12px;">' + (t.selector_loading || "Loading…") + '</div>';
             return;
@@ -2970,7 +2970,7 @@
         document.querySelectorAll(".selector-strat-cb:checked").forEach(function(cb) {
             strategies.push(cb.value);
         });
-        var t = i18n[currentLang] || i18n.en;
+        var t = I18N[currentLang] || I18N.en;
         if (!strategies.length) {
             alert(t.selector_need_strategy || "Select at least one strategy.");
             return;
@@ -3039,7 +3039,7 @@
     }
 
     function renderSelectorResults(result) {
-        var t = i18n[currentLang] || i18n.en;
+        var t = I18N[currentLang] || I18N.en;
         selectorPicks = result.picks || [];
         var box = document.getElementById("selector-results");
         document.getElementById("selector-progress").style.display = "none";
@@ -3124,7 +3124,7 @@
         .then(data => {
             watchlistData = data.items || [];
             renderWatchlist();
-            var t = i18n[currentLang] || i18n.en;
+            var t = I18N[currentLang] || I18N.en;
             btn.textContent = "✓ " + (data.added || []).length + " " + (t.selector_added || "added");
         })
         .catch(err => {
