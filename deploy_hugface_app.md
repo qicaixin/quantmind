@@ -1,29 +1,51 @@
 # Deploy QuantMind to Hugging Face Spaces
 
+## Two-Space workflow (prod + staging)
+
+We run **two** HF Spaces to keep production stable while features are being tested:
+
+| Space | URL | Tracks | Purpose |
+|---|---|---|---|
+| Production | https://huggingface.co/spaces/qicaixin/ai-helper | `master` branch | User-facing; only updated after PR merge |
+| Staging | https://huggingface.co/spaces/qicaixin/ai-helper-staging | feature branch under test | QA before merge |
+
+### Golden rules
+1. **Never commit directly to `master`.** All changes go via PRs from `feat/*` or `fix/*` branches.
+2. **Deploy the feature branch to staging first.** Validate end-to-end on the staging Space.
+3. **Only after the user confirms it works**, merge the PR and deploy `master → prod`.
+
 ## Prerequisites
 
 - [Git](https://git-scm.com/) installed
 - [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli) logged in (`huggingface-cli login`)
-- Push access to the HF Space repo (`qicaixin/ai-helper`)
+- Push access to both HF Space repos
 
 ## One-Time Setup
 
-### 1. Add the HF Space as a git remote
+### 1. Add both HF Spaces as git remotes
 
 ```bash
 cd C:\qlik\tools\kronos-qlib-toolkit
-git remote add hf https://huggingface.co/spaces/qicaixin/ai-helper
+git remote add hf         https://huggingface.co/spaces/qicaixin/ai-helper
+git remote add hf-staging https://huggingface.co/spaces/qicaixin/ai-helper-staging
 ```
 
 Verify remotes:
 
 ```bash
 git remote -v
-# origin  https://github.com/zbcui/quantmind.git (fetch/push)
-# hf      https://huggingface.co/spaces/qicaixin/ai-helper (fetch/push)
+# qicaixin    https://github.com/qicaixin/quantmind.git (fetch/push)
+# hf          https://huggingface.co/spaces/qicaixin/ai-helper (fetch/push)
+# hf-staging  https://huggingface.co/spaces/qicaixin/ai-helper-staging (fetch/push)
 ```
 
-### 2. Key files required by HF Spaces
+### 2. Copy secrets to the staging Space
+
+The `duplicate_space` SDK call copies the Dockerfile and hardware tier but **not the secrets**.
+Open https://huggingface.co/spaces/qicaixin/ai-helper-staging/settings and add the same
+environment variables / secrets that the prod Space has (LLM API keys, etc).
+
+### 3. Key files required by HF Spaces
 
 | File | Purpose |
 |---|---|
@@ -44,29 +66,35 @@ app_port: 7080
 ---
 ```
 
-## Deploy (Every Time)
+## Deploy a feature for testing (staging)
 
-### Step 1 — Commit and push to GitHub
+While iterating on a `feat/*` branch:
 
 ```bash
-git add -A
-git commit -m "your commit message"
-git push origin master
+# Push the feature branch to GitHub as usual
+git push qicaixin feat/my-feature
+
+# Deploy the SAME branch to the staging Space (mapped to its main branch)
+git push hf-staging feat/my-feature:main --force
 ```
 
-### Step 2 — Push to HF Spaces
+Monitor build at https://huggingface.co/spaces/qicaixin/ai-helper-staging.
+Iterate on the branch — every push to `hf-staging` redeploys staging only.
+Production stays untouched.
+
+## Deploy to production (only after PR merge)
 
 ```bash
+# 1. Ensure master is up to date with the merged PR
+git checkout master
+git pull qicaixin master
+
+# 2. Push master to prod (mapped to main)
 git push hf master:main --force
 ```
 
-> **Note:** HF Spaces uses `main` as the default branch, while our GitHub repo uses `master`. The `master:main` refspec handles the mapping. `--force` is used because the HF repo may have diverged.
-
-### Step 3 — Monitor the build
-
-Open https://huggingface.co/spaces/qicaixin/ai-helper and watch the **Build** logs. The Docker build typically takes 3–5 minutes (mostly pip installing torch/pyarrow).
-
-Once the status shows **Running**, the app is live.
+Open https://huggingface.co/spaces/qicaixin/ai-helper and watch the **Build** logs.
+The Docker build typically takes 3–5 minutes.
 
 ## Troubleshooting
 
@@ -77,11 +105,14 @@ Once the status shows **Running**, the app is live.
 | App starts but shows blank/error | Check **Container Logs** on HF. Common issue: `host="127.0.0.1"` instead of `host="0.0.0.0"` in `app.py`. |
 | `git push hf` asks for credentials | Run `huggingface-cli login` and enter your HF token. |
 | Port mismatch | Ensure `app_port` in README.md YAML matches the port in `app.py` (currently both 7080). |
+| Staging works but prod doesn't | Likely a missing secret — compare env vars between the two Spaces' Settings pages. |
 
 ## Architecture Notes
 
-- **GitHub** (`origin`) is the source of truth for code
-- **HF Spaces** (`hf`) is the deployment target — receives force-pushes from master
+- **GitHub `qicaixin/quantmind`** is the source of truth for code (PR-based workflow)
+- **`hf-staging`** receives feature-branch force-pushes for QA
+- **`hf` (prod)** only receives `master:main` after a PR has been merged
 - The Dockerfile copies the entire repo into `/app` and runs `python app.py`
 - SQLite DB and outputs are ephemeral in the container (reset on each redeploy)
-- Secrets (API keys) should be configured per-user via the Settings UI after login
+- Secrets (API keys) are configured per-Space via the Settings UI; staging needs its own set
+
