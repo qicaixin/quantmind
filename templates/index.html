@@ -2880,7 +2880,28 @@
     loadWatchlist();
 
     // ── AI Selector ──────────────────────────────────────────────────
-    var selectorStrategies = [];
+    // Static fallback so the modal works even before the API responds (or if
+    // the request is redirected to /login etc). The /api/selector/strategies
+    // endpoint can override these once it answers.
+    var SELECTOR_STRATEGIES_FALLBACK = [
+        { key: "tianliang_lianban",
+          label_en: "Sky Volume + Consecutive Limit-Up", label_zh: "天量连板",
+          description_en: "Today closes at limit-up on the largest volume of the past 120 bars, with recent consecutive limit-ups.",
+          description_zh: "今日涨停 + 近120日最大量，且近5日有连板。" },
+        { key: "tianliang_fanbao",
+          label_en: "Sky Volume Reversal", label_zh: "天量反包",
+          description_en: "Day-before limit-up, yesterday broke the streak, today turns strong on sky volume.",
+          description_zh: "前天涨停 → 昨天断板 → 今天天量转强。" },
+        { key: "tianliang_buzhi",
+          label_en: "Sky Volume Hold (Watch)", label_zh: "天量不跌(观察)",
+          description_en: "Sky-volume up day at moderate position; needs 2-day follow-up of tight consolidation.",
+          description_zh: "天量涨停/大涨，位置不高(MA60+35%以内)，需跟踪2天小阴小阳。" },
+        { key: "tianliang_huicai",
+          label_en: "Sky Volume Pullback (Watch)", label_zh: "天量回踩(观察)",
+          description_en: "Big up day on sky volume without limit-up; wait for pullback to mid-candle.",
+          description_zh: "天量大涨但没涨停，等回踩到大阳线一半位置。" }
+    ];
+    var selectorStrategies = SELECTOR_STRATEGIES_FALLBACK.slice();
     var selectorJobId = null;
     var selectorPollTimer = null;
     var selectorPicks = [];
@@ -2892,7 +2913,9 @@
         document.getElementById("selector-results").style.display = "none";
         document.getElementById("selector-add-all-btn").style.display = "none";
         document.getElementById("selector-run-btn").disabled = false;
-        if (!selectorStrategies.length) loadSelectorStrategies();
+        // Render immediately from fallback, then refresh from API in background.
+        renderSelectorStrategyList();
+        loadSelectorStrategies();
     }
 
     function closeSelectorModal() {
@@ -2901,13 +2924,23 @@
     }
 
     function loadSelectorStrategies() {
-        fetch("/api/selector/strategies")
-            .then(r => r.json())
-            .then(data => {
-                selectorStrategies = data.strategies || [];
-                renderSelectorStrategyList();
+        fetch("/api/selector/strategies", { credentials: "same-origin", redirect: "manual" })
+            .then(function(r) {
+                // Login redirect or any non-2xx → keep fallback list silently.
+                if (!r.ok || r.type === "opaqueredirect") return null;
+                var ct = r.headers.get("content-type") || "";
+                if (ct.indexOf("application/json") < 0) return null;
+                return r.json();
             })
-            .catch(err => console.error("Selector strategies load failed:", err));
+            .then(function(data) {
+                if (data && Array.isArray(data.strategies) && data.strategies.length) {
+                    selectorStrategies = data.strategies;
+                    renderSelectorStrategyList();
+                }
+            })
+            .catch(function(err) {
+                console.warn("Selector strategies API unavailable, using fallback:", err);
+            });
     }
 
     function renderSelectorStrategyList() {
