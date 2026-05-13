@@ -703,6 +703,7 @@
             <button class="watchlist-add-btn" id="watchlist-add-btn" onclick="addToWatchlist()"
                     data-i18n="watchlist_add">+ Add</button>
         </div>
+        <div id="watchlist-status" style="display:none;margin-top:6px;font-size:12px;padding:6px 8px;border-radius:6px;"></div>
         <button class="watchlist-add-btn" id="selector-open-btn"
                 style="width:100%;margin-top:8px;background:#7c3aed;"
                 onclick="openSelectorModal()"
@@ -2818,28 +2819,63 @@
         list.innerHTML = html;
     }
 
+    function showWatchlistStatus(msg, kind) {
+        var el = document.getElementById("watchlist-status");
+        if (!el) return;
+        var palette = kind === "error"
+            ? { bg: "#fef2f2", color: "#b91c1c", border: "#fecaca" }
+            : { bg: "#ecfdf5", color: "#047857", border: "#a7f3d0" };
+        el.style.background = palette.bg;
+        el.style.color = palette.color;
+        el.style.border = "1px solid " + palette.border;
+        el.textContent = msg;
+        el.style.display = "block";
+        clearTimeout(showWatchlistStatus._t);
+        showWatchlistStatus._t = setTimeout(function() { el.style.display = "none"; }, 4000);
+    }
+
     function addToWatchlist() {
         var input = document.getElementById("watchlist-input");
         var btn = document.getElementById("watchlist-add-btn");
         var code = (input.value || "").trim();
-        if (code.length < 6) { input.focus(); return; }
+        if (code.length < 6) {
+            showWatchlistStatus("Please enter a 6-digit stock code", "error");
+            input.focus();
+            return;
+        }
         btn.disabled = true;
         fetch("/api/watchlist", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", "Accept": "application/json" },
+            credentials: "same-origin",
             body: JSON.stringify({ symbol: code }),
         })
-        .then(r => r.json())
-        .then(data => {
+        .then(function(r) {
+            var ct = r.headers.get("content-type") || "";
+            if (!ct.includes("application/json")) {
+                if (r.redirected || r.status === 401 || r.status === 403) {
+                    throw new Error("Session expired — please reload and sign in again");
+                }
+                throw new Error("Server returned " + r.status + " (non-JSON response)");
+            }
+            return r.json().then(function(data) {
+                if (!r.ok || data.error) {
+                    throw new Error(data.error || ("HTTP " + r.status));
+                }
+                return data;
+            });
+        })
+        .then(function(data) {
             btn.disabled = false;
-            if (data.error) { alert(data.error); return; }
             watchlistData = data.items || [];
             renderWatchlist();
             input.value = "";
+            showWatchlistStatus("Added " + code, "success");
         })
-        .catch(e => {
+        .catch(function(e) {
             btn.disabled = false;
-            alert("Failed to add: " + e);
+            console.error("addToWatchlist failed:", e);
+            showWatchlistStatus("Failed to add: " + (e && e.message ? e.message : e), "error");
         });
     }
 
