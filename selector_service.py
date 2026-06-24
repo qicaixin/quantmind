@@ -38,6 +38,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from config import ToolkitConfig
+import user_strategy as _us
 
 logger = logging.getLogger(__name__)
 
@@ -360,22 +361,42 @@ def _fetch_hist_hk(code: str, start: str, end: str) -> tuple[str, pd.DataFrame |
 
 def _analyze_a(code: str, name: str, price: float, vol_today: float,
                amount_today: float, pct_chg: float, hist: pd.DataFrame,
-               wanted: set[str]) -> dict[str, Any] | None:
-    """Return scan result if any wanted strategy matches, else None."""
+               wanted: set[str],
+               user_strategies: list[dict[str, Any]] | None = None,
+               ) -> dict[str, Any] | None:
+    """Return scan result if any wanted built-in strategy or user strategy
+    matches, else None.
+
+    Built-in (天量战法) strategies require a sky-volume precondition. User
+    strategies evaluate independently of that precondition — their rules
+    fully determine match.
+    """
     if hist is None or len(hist) < 60 or "成交量" not in hist.columns:
         return None
 
-    window = hist["成交量"].tail(SKY_VOL_WINDOW + 1)
-    max_vol = float(window.iloc[:-1].max() or 0)
-    if max_vol <= 0 or vol_today < max_vol * SKY_VOL_RATIO:
-        return None
+    matched: list[str] = []
+    reasons: list[str] = []
 
+    # ── User strategies first (no preconditions; rules-only) ────────
+    user_strategies = user_strategies or []
+    if user_strategies:
+        metrics = _us.compute_metrics(hist, price, vol_today, amount_today, pct_chg)
+        for strat in user_strategies:
+            try:
+                ok, hits = _us.evaluate(strat, metrics, strategy_label=strat.get("label"))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("user strategy %s eval failed on %s: %s",
+                             strat.get("id"), code, exc)
+                continue
+            if ok:
+                matched.append(f"user:{strat['id']}")
+                reasons.extend(hits)
+
+    # Compute baseline indicators always (needed for response payload too)
     ma60 = float(hist["收盘"].tail(60).mean())
-    if ma60 <= 0:
-        return None
-    price_position = (price - ma60) / ma60 * 100.0
-
+    price_position = ((price - ma60) / ma60 * 100.0) if ma60 > 0 else 0.0
     limit = _limit_up_pct(code)
+    limit_type = _classify(code, pct_chg)
 
     # consecutive limit-up board count looking back from today
     recent_5 = hist.tail(5)
@@ -386,54 +407,57 @@ def _analyze_a(code: str, name: str, price: float, vol_today: float,
         else:
             break
 
-    # High-position filter: exclude unless 连板龙头 (≥2 consecutive limits)
-    if price_position > POSITION_HIGH_PCT and board_count < 2:
-        return None
+    # ── Built-in (天量战法) branch: sky-volume precondition ─────────
+    wanted_builtin = wanted & set(SELECTOR_STRATEGIES.keys())
+    if wanted_builtin and ma60 > 0:
+        window = hist["成交量"].tail(SKY_VOL_WINDOW + 1)
+        max_vol = float(window.iloc[:-1].max() or 0)
+        sky_volume = max_vol > 0 and vol_today >= max_vol * SKY_VOL_RATIO
 
-    limit_type = _classify(code, pct_chg)
-    yesterday_pct = _safe_float(hist.iloc[-2].get("涨跌幅", 0)) if len(hist) >= 2 else 0
-    day_before_pct = _safe_float(hist.iloc[-3].get("涨跌幅", 0)) if len(hist) >= 3 else 0
-    yesterday_limit = yesterday_pct >= limit - 1.0
-    day_before_limit = day_before_pct >= limit - 1.0
-    is_board = board_count >= 1
+        # High-position filter: exclude unless 连板龙头 (≥2 consecutive limits)
+        position_block = price_position > POSITION_HIGH_PCT and board_count < 2
 
-    matched: list[str] = []
-    reasons: list[str] = []
+        if sky_volume and not position_block:
+            yesterday_pct = _safe_float(hist.iloc[-2].get("涨跌幅", 0)) if len(hist) >= 2 else 0
+            day_before_pct = _safe_float(hist.iloc[-3].get("涨跌幅", 0)) if len(hist) >= 3 else 0
+            yesterday_limit = yesterday_pct >= limit - 1.0
+            day_before_limit = day_before_pct >= limit - 1.0
+            is_board = board_count >= 1
 
-    if ("tianliang_lianban" in wanted
-            and limit_type == "涨停" and 1 <= board_count <= BOARD_LIMIT):
-        matched.append("tianliang_lianban")
-        reasons.append(
-            f"【天量连板·{board_count}板】确认是否为板块龙一：龙一可在2-5%区间低吸，"
-            f"或等换手充分后打回封板；非龙一仅打换手回封板。"
-            f"板块：{_stock_board(code)}。"
-        )
+            if ("tianliang_lianban" in wanted
+                    and limit_type == "涨停" and 1 <= board_count <= BOARD_LIMIT):
+                matched.append("tianliang_lianban")
+                reasons.append(
+                    f"【天量连板·{board_count}板】确认是否为板块龙一：龙一可在2-5%区间低吸，"
+                    f"或等换手充分后打回封板；非龙一仅打换手回封板。"
+                    f"板块：{_stock_board(code)}。"
+                )
 
-    if ("tianliang_fanbao" in wanted
-            and day_before_limit and not yesterday_limit and pct_chg >= 0
-            and board_count <= BOARD_LIMIT):
-        matched.append("tianliang_fanbao")
-        reasons.append(
-            "【天量反包】前天涨停断板，今日转强：分时黄线>0轴可在2-5%低吸，>5%等打板，"
-            "回封板积极参与。"
-        )
+            if ("tianliang_fanbao" in wanted
+                    and day_before_limit and not yesterday_limit and pct_chg >= 0
+                    and board_count <= BOARD_LIMIT):
+                matched.append("tianliang_fanbao")
+                reasons.append(
+                    "【天量反包】前天涨停断板，今日转强：分时黄线>0轴可在2-5%低吸，>5%等打板，"
+                    "回封板积极参与。"
+                )
 
-    if ("tianliang_buzhi" in wanted
-            and limit_type in ("涨停", "大涨")
-            and board_count <= 2 and price_position < 35.0):
-        matched.append("tianliang_buzhi")
-        reasons.append(
-            "【天量不跌·观察】纳入观察池，需跟踪2天小阴小阳(振幅<3%)不跌破，"
-            "第3天尾盘可介入(尾盘买入法)。"
-        )
+            if ("tianliang_buzhi" in wanted
+                    and limit_type in ("涨停", "大涨")
+                    and board_count <= 2 and price_position < 35.0):
+                matched.append("tianliang_buzhi")
+                reasons.append(
+                    "【天量不跌·观察】纳入观察池，需跟踪2天小阴小阳(振幅<3%)不跌破，"
+                    "第3天尾盘可介入(尾盘买入法)。"
+                )
 
-    if ("tianliang_huicai" in wanted
-            and limit_type == "大涨" and not is_board and price_position < 30.0):
-        matched.append("tianliang_huicai")
-        reasons.append(
-            "【天量回踩·观察】等待回调到大阳线一半位置再考虑底仓，"
-            "适合潜伏；爆发力弱于其他模式。"
-        )
+            if ("tianliang_huicai" in wanted
+                    and limit_type == "大涨" and not is_board and price_position < 30.0):
+                matched.append("tianliang_huicai")
+                reasons.append(
+                    "【天量回踩·观察】等待回调到大阳线一半位置再考虑底仓，"
+                    "适合潜伏；爆发力弱于其他模式。"
+                )
 
     if not matched:
         return None
@@ -569,7 +593,8 @@ def _get_a_spot() -> pd.DataFrame:
 # ── Universe scan ──────────────────────────────────────────────────────
 
 def _scan_market(market: str, wanted: set[str], top_n: int, max_workers: int,
-                 progress: Callable[[float, str], None]
+                 progress: Callable[[float, str], None],
+                 user_strategies: list[dict[str, Any]] | None = None,
                  ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     ak = _ak()
     start = _start_date()
@@ -644,7 +669,12 @@ def _scan_market(market: str, wanted: set[str], top_n: int, max_workers: int,
         hist = hist_map.get(code)
         if hist is None:
             continue
-        res = analyze(code, name, price, vol, amt, pct, hist, wanted)
+        # Only A-market evaluates user strategies (Phase 2 scope = A-share)
+        if market == "A":
+            res = analyze(code, name, price, vol, amt, pct, hist, wanted,
+                          user_strategies=user_strategies)
+        else:
+            res = analyze(code, name, price, vol, amt, pct, hist, wanted)
         if res:
             results.append(res)
     progress(0.95, f"{market} scan found {len(results)} candidates.")
@@ -705,11 +735,36 @@ def _save_run(config: ToolkitConfig, payload: dict[str, Any]) -> str | None:
 
 def _run_job(job_id: str, config: ToolkitConfig, markets: list[str],
              strategies: list[str], top_n_a: int, top_n_hk: int,
-             max_workers: int) -> None:
+             max_workers: int, user_id: int = 1) -> None:
     started_at = time.time()
     _set_job(job_id, status="running", progress=0.0, message="Starting…",
              started_at=started_at)
-    wanted = set(strategies)
+
+    # Split built-in strategy keys from user-strategy refs ("user:<id>")
+    builtin_keys: set[str] = set()
+    user_strategy_ids: list[str] = []
+    for s in strategies:
+        if s.startswith("user:"):
+            user_strategy_ids.append(s[5:])
+        elif s in SELECTOR_STRATEGIES:
+            builtin_keys.add(s)
+
+    # Load user strategy docs from storage (if any)
+    user_strategies_docs: list[dict[str, Any]] = []
+    if user_strategy_ids:
+        try:
+            from trade_storage import get_user_strategy, list_user_strategies  # local import to avoid cycles
+            if user_strategy_ids == ["*"]:
+                user_strategies_docs = [
+                    s for s in list_user_strategies(config, user_id=user_id, enabled_only=True)
+                ]
+            else:
+                for sid in user_strategy_ids:
+                    s = get_user_strategy(config, sid, user_id=user_id)
+                    if s and s.get("enabled", True):
+                        user_strategies_docs.append(s)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to load user strategies for job %s", job_id)
 
     def progress(p: float, msg: str) -> None:
         _set_job(job_id, progress=round(p, 3), message=msg)
@@ -726,7 +781,10 @@ def _run_job(job_id: str, config: ToolkitConfig, markets: list[str],
                 progress(_o + _s * p, msg)
 
             top_n = top_n_a if market == "A" else top_n_hk
-            picks, stats = _scan_market(market, wanted, top_n, max_workers, sub_progress)
+            picks, stats = _scan_market(
+                market, builtin_keys, top_n, max_workers, sub_progress,
+                user_strategies=user_strategies_docs if market == "A" else None,
+            )
             results.extend(picks)
             scan_stats.append(stats)
 
@@ -780,11 +838,19 @@ def _run_job(job_id: str, config: ToolkitConfig, markets: list[str],
 def submit_job(config: ToolkitConfig, *, markets: list[str],
                strategies: list[str], top_n_a: int = DEFAULT_TOP_ACTIVE_A,
                top_n_hk: int = DEFAULT_TOP_ACTIVE_HK,
-               max_workers: int = DEFAULT_MAX_WORKERS) -> str:
+               max_workers: int = DEFAULT_MAX_WORKERS,
+               user_id: int = 1) -> str:
     markets = [m for m in markets if m in ("A", "HK")]
     if not markets:
         raise ValueError("At least one market required (A or HK).")
-    strategies = [s for s in strategies if s in SELECTOR_STRATEGIES]
+    # Accept built-in strategy keys ("tianliang_*") and user refs ("user:<id>")
+    cleaned: list[str] = []
+    for s in strategies:
+        if s in SELECTOR_STRATEGIES:
+            cleaned.append(s)
+        elif s.startswith("user:") and len(s) > 5:
+            cleaned.append(s)
+    strategies = cleaned
     if not strategies:
         raise ValueError("At least one strategy required.")
     top_n_a = max(20, min(int(top_n_a), 1000))
@@ -798,7 +864,8 @@ def submit_job(config: ToolkitConfig, *, markets: list[str],
 
     thread = threading.Thread(
         target=_run_job,
-        args=(job_id, config, markets, strategies, top_n_a, top_n_hk, max_workers),
+        args=(job_id, config, markets, strategies, top_n_a, top_n_hk,
+              max_workers, user_id),
         daemon=True, name=f"selector-{job_id}",
     )
     thread.start()

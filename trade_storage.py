@@ -206,6 +206,21 @@ def ensure_storage(config: ToolkitConfig) -> None:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
+
+            CREATE TABLE IF NOT EXISTS user_strategies (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                rules_json TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                source TEXT NOT NULL DEFAULT 'form',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_strategies_user
+                ON user_strategies(user_id);
             """
         )
         conn.commit()
@@ -1466,3 +1481,118 @@ def remove_watchlist_item(config: ToolkitConfig, symbol: str, *, user_id: int = 
             (user_id, symbol),
         )
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# User-defined selector strategies (Phase 2 — AI Selector)
+# ---------------------------------------------------------------------------
+
+def list_user_strategies(config: ToolkitConfig, *, user_id: int = DEFAULT_USER_ID,
+                          enabled_only: bool = False) -> list[dict]:
+    ensure_storage(config)
+    with closing(_connect(config)) as conn:
+        sql = "SELECT * FROM user_strategies WHERE user_id = ?"
+        args: list = [user_id]
+        if enabled_only:
+            sql += " AND enabled = 1"
+        sql += " ORDER BY updated_at DESC"
+        rows = conn.execute(sql, tuple(args)).fetchall()
+    return [_user_strategy_row_to_dict(r) for r in rows]
+
+
+def get_user_strategy(config: ToolkitConfig, strategy_id: str, *,
+                       user_id: int = DEFAULT_USER_ID) -> dict | None:
+    ensure_storage(config)
+    with closing(_connect(config)) as conn:
+        row = conn.execute(
+            "SELECT * FROM user_strategies WHERE id = ? AND user_id = ?",
+            (strategy_id, user_id),
+        ).fetchone()
+    return _user_strategy_row_to_dict(row) if row else None
+
+
+def create_user_strategy(config: ToolkitConfig, doc: dict, *,
+                          user_id: int = DEFAULT_USER_ID,
+                          source: str = "form") -> dict:
+    ensure_storage(config)
+    sid = uuid.uuid4().hex[:12]
+    now = datetime.now().isoformat(timespec="seconds")
+    rules_payload = {
+        "match_mode": doc.get("match_mode", "AND"),
+        "min_match_rules": doc.get("min_match_rules", 1),
+        "rules": doc.get("rules", []),
+    }
+    label = (doc.get("label") or "").strip()
+    description = (doc.get("description") or "").strip()
+    enabled = 1 if doc.get("enabled", True) else 0
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            "INSERT INTO user_strategies (id, user_id, label, description, "
+            "rules_json, enabled, source, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (sid, user_id, label, description,
+             json.dumps(rules_payload, ensure_ascii=False),
+             enabled, source, now, now),
+        )
+        conn.commit()
+    return get_user_strategy(config, sid, user_id=user_id) or {}
+
+
+def update_user_strategy(config: ToolkitConfig, strategy_id: str, doc: dict, *,
+                          user_id: int = DEFAULT_USER_ID) -> dict | None:
+    ensure_storage(config)
+    existing = get_user_strategy(config, strategy_id, user_id=user_id)
+    if existing is None:
+        return None
+    now = datetime.now().isoformat(timespec="seconds")
+    label = (doc.get("label") or existing["label"]).strip()
+    description = (doc.get("description") or existing.get("description", "")).strip()
+    enabled = 1 if doc.get("enabled", existing.get("enabled", True)) else 0
+    rules_payload = {
+        "match_mode": doc.get("match_mode", existing.get("match_mode", "AND")),
+        "min_match_rules": doc.get("min_match_rules",
+                                   existing.get("min_match_rules", 1)),
+        "rules": doc.get("rules", existing.get("rules", [])),
+    }
+    with closing(_connect(config)) as conn:
+        conn.execute(
+            "UPDATE user_strategies SET label = ?, description = ?, "
+            "rules_json = ?, enabled = ?, updated_at = ? "
+            "WHERE id = ? AND user_id = ?",
+            (label, description,
+             json.dumps(rules_payload, ensure_ascii=False),
+             enabled, now, strategy_id, user_id),
+        )
+        conn.commit()
+    return get_user_strategy(config, strategy_id, user_id=user_id)
+
+
+def delete_user_strategy(config: ToolkitConfig, strategy_id: str, *,
+                          user_id: int = DEFAULT_USER_ID) -> bool:
+    ensure_storage(config)
+    with closing(_connect(config)) as conn:
+        cur = conn.execute(
+            "DELETE FROM user_strategies WHERE id = ? AND user_id = ?",
+            (strategy_id, user_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def _user_strategy_row_to_dict(row: sqlite3.Row | None) -> dict:
+    if row is None:
+        return {}
+    payload = json.loads(row["rules_json"] or "{}")
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "label": row["label"],
+        "description": row["description"] or "",
+        "match_mode": payload.get("match_mode", "AND"),
+        "min_match_rules": payload.get("min_match_rules", 1),
+        "rules": payload.get("rules", []),
+        "enabled": bool(row["enabled"]),
+        "source": row["source"] if "source" in row.keys() else "form",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
